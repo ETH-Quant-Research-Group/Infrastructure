@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Core infrastructure of the fund"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []  # runtime deps go here as modules are built out
+dependencies = [
+    "httpx>=0.28.1",
+    "lighter-sdk",
+    "websockets>=16.0",
+]  # runtime deps go here as modules are built out
 
 [dependency-groups]
 dev = [
@@ -25,6 +29,7 @@ dev = [
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+explicit_package_bases = true
 warn_unused_ignores = true
 warn_return_any = true
 
@@ -60,3 +65,6 @@ exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
 ]
+
+[tool.uv.sources]
+lighter-sdk = { git = "https://github.com/elliottech/lighter-python.git" }
