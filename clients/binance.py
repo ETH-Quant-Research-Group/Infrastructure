@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -9,16 +9,16 @@ if TYPE_CHECKING:
 from datetime import UTC, datetime
 
 from data.connectors.binance import BinanceConnector
+from data.connectors.types import KlineInterval
 from data.normalizers.bars import build_dollar_bars, build_tick_bars, build_volume_bars
 from data.normalizers.binance import to_time_bar, to_trade
-from interfaces.client import BaseClient
+from interfaces.client import BaseCryptoClient
 
 if TYPE_CHECKING:
-    from data.connectors.types import KlineInterval
     from data.types import DollarBar, TickBar, TimeBar, Trade, VolumeBar
 
 
-class BinanceClient(BaseClient):
+class BinanceClient(BaseCryptoClient):
     """User-facing Binance client.
 
     Wraps the connector and normalizer pipeline so callers only import
@@ -39,10 +39,13 @@ class BinanceClient(BaseClient):
             )
     """
 
+    symbols: ClassVar[list[str]] = ["BTCUSDT"]
+    intervals: ClassVar[list[KlineInterval]] = [KlineInterval.M1]
+
     def __init__(self, api_key: str | None = None) -> None:
         self._connector = BinanceConnector(api_key)
 
-    # ---------------------------------------------------------------- historical
+    # oke historical
 
     async def time_bars(
         self,

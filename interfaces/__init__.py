@@ -1,4 +1,4 @@
-from interfaces.client import BaseClient
+from interfaces.client import BaseCryptoClient
 from interfaces.strategy import BaseStrategy
 
-__all__ = ["BaseClient", "BaseStrategy"]
+__all__ = ["BaseCryptoClient", "BaseStrategy"]

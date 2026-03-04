@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 from datetime import UTC, datetime
 
 from data.connectors.binance_futures import BinanceFuturesConnector
+from data.connectors.types import KlineInterval
 from data.normalizers.bars import build_dollar_bars, build_tick_bars, build_volume_bars
 from data.normalizers.binance import to_trade
 from data.normalizers.binance_futures import (
@@ -16,20 +17,19 @@ from data.normalizers.binance_futures import (
     to_funding_rate,
     to_futures_time_bar,
 )
-from interfaces.client import BaseClient
+from interfaces.client import BaseCryptoFuturesClient
 
 if TYPE_CHECKING:
-    from data.connectors.types import KlineInterval
     from data.types import DollarBar, FundingRate, TickBar, TimeBar, Trade, VolumeBar
 
 
-class BinanceFuturesClient(BaseClient):
+class BinanceFuturesClient(BaseCryptoFuturesClient):
     """User-facing Binance USD-M Futures client.
 
     Wraps the futures connector and normalizer pipeline so callers only
     import this class and work with canonical types.
 
-    Extends :class:`~interfaces.client.BaseClient` with futures-specific
+    Extends :class:`~interfaces.client.BaseCryptoClient` with futures-specific
     methods: :meth:`funding_rates`, :meth:`current_funding_rate`, and
     :meth:`live_funding_rates`.
 
@@ -58,6 +58,9 @@ class BinanceFuturesClient(BaseClient):
             async for rate in client.live_funding_rates("BTCUSDT"):
                 print(rate.funding_rate, rate.next_funding_time)
     """
+
+    symbols: ClassVar[list[str]] = ["BTCUSDT"]
+    intervals: ClassVar[list[KlineInterval]] = [KlineInterval.M1]
 
     def __init__(self, api_key: str | None = None) -> None:
         self._connector = BinanceFuturesConnector(api_key)

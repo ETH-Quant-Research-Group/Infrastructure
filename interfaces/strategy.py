@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from decimal import Decimal
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
-    from data.types import AnyBar, Trade
+    from data.types import AnyBar, FundingRate, Trade
+    from interfaces.signals import TargetPosition
 
 
 class BaseStrategy(ABC):
@@ -14,23 +16,44 @@ class BaseStrategy(ABC):
     data.  Override :meth:`on_start` and :meth:`on_stop` for setup and
     teardown logic.
 
+    Class-level attributes to set on each subclass:
+
+    ``topics``
+        List of bus topic strings this strategy wants to receive.
+        NATS subject strings, e.g. ``"futures.BTCUSDT.bars.1m"``.
+
+    ``max_loss``
+        Maximum cumulative loss (positive number) before the
+        :class:`~engine.guard.StrategyGuard` halts the strategy.
+
     Example::
 
         class MomentumStrategy(BaseStrategy):
-            def on_bar(self, bar: AnyBar) -> None:
+            topics = [futures_bars_topic("BTCUSDT", KlineInterval.M1)]
+            max_loss = Decimal("500")
+
+            def on_bar(self, bar: AnyBar) -> TargetPosition | None:
                 # your signal logic here
                 ...
     """
+
+    topics: ClassVar[list[str]] = []
+    max_loss: ClassVar[Decimal] = Decimal("1000")
 
     def on_start(self) -> None:  # noqa: B027
         """Called once before the strategy begins receiving bars."""
 
     @abstractmethod
-    def on_bar(self, bar: AnyBar) -> None:
+    def on_bar(self, bar: AnyBar) -> TargetPosition | None:
         """Called for each new bar, whether live or historical."""
 
-    def on_trade(self, trade: Trade) -> None:  # noqa: B027
+    def on_trade(self, trade: Trade) -> TargetPosition | None:  # noqa: B027
         """Called for each individual trade tick (optional override)."""
+        return None
+
+    def on_funding_rate(self, rate: FundingRate) -> TargetPosition | None:  # noqa: B027
+        """Called for each funding-rate update (optional override)."""
+        return None
 
     def on_stop(self) -> None:  # noqa: B027
         """Called once after the strategy stops receiving bars."""

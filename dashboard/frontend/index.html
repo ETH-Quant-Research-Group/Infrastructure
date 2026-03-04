@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Infrastructure Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Infrastructure Dashboard</h1>
+    <span id="ws-status" class="status offline">Disconnected</span>
+  </header>
+
+  <main>
+    <section id="market" class="panel">
+      <h2>Market Data</h2>
+      <div id="market-content"></div>
+    </section>
+
+    <section id="positions" class="panel">
+      <h2>Positions</h2>
+      <div id="positions-content"></div>
+    </section>
+
+    <section id="orders" class="panel">
+      <h2>Orders</h2>
+      <div id="orders-content"></div>
+    </section>
+
+    <section id="strategies" class="panel">
+      <h2>Strategies</h2>
+      <div id="strategies-content"></div>
+    </section>
+
+    <section id="performance" class="panel">
+      <h2>Performance</h2>
+      <div id="performance-content"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
