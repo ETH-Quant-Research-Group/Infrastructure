@@ -1,14 +1,27 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+
+from dashboard.store import pnl_history, pnl_latest
 
 router = APIRouter()
 
 
 @router.get("/pnl")
 async def get_pnl() -> dict:
-    """Time-series PnL across all strategies."""
-    return {"pnl": []}
+    """Latest PnL snapshot for every active strategy."""
+    return {"pnl": list(pnl_latest.values())}
+
+
+@router.get("/pnl/{strategy_id}")
+async def get_pnl_strategy(strategy_id: str) -> dict:
+    """Latest snapshot + full history for a single strategy."""
+    if strategy_id not in pnl_latest:
+        raise HTTPException(status_code=404, detail=f"No PnL data for '{strategy_id}'")
+    return {
+        "latest": pnl_latest[strategy_id],
+        "history": pnl_history.get(strategy_id, []),
+    }
 
 
 @router.get("/metrics")

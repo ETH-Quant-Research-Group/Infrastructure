@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@layer base {
+  html, body {
+    background: #0f0f0f;
+    color: #d1d4dc;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+.font-notion-inter {
+  font-family: 'Inter', -apple-system, "system-ui", "Segoe UI", Helvetica, "Apple Color Emoji", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol";
+  font-feature-settings: "cv01", "cv02", "cv09";
+  font-style: normal;
+}
