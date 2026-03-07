@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter
 
-from dashboard.store import orders
+from dashboard.store import fills_by_strategy, orders
 
 router = APIRouter()
 
@@ -15,6 +15,13 @@ _ACTIVE_WINDOW = timedelta(seconds=30)
 async def get_orders() -> dict:
     """Full order history, newest first."""
     return {"orders": list(reversed(orders))}
+
+
+@router.get("/strategy/{strategy_id}")
+async def get_strategy_fills(strategy_id: str) -> dict:
+    """Fill history for a single strategy, newest first."""
+    fills = fills_by_strategy.get(strategy_id, [])
+    return {"fills": list(reversed(fills))}
 
 
 @router.get("/active")
