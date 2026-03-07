@@ -210,3 +210,6 @@ __marimo__/
 .DS_Store
 
 tests/notebooks
+
+node_modules/
+package-lock.json

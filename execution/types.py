@@ -44,6 +44,8 @@ class Order:
     ``quantity`` is in base-asset units: shares for equities, base currency
     for FX, base asset for crypto.
 
+    ``price`` is the limit price.  Set to ``Decimal(0)`` for market orders.
+
     ``client_order_id`` is an optional caller-assigned label that most brokers
     echo back; its format is broker-specific (some require integers).
     """
@@ -103,16 +105,42 @@ class OrderResult:
     ZK rollup tx hash; for conventional brokers it is the exchange order ID.
     Brokers that require separate market + order indices to cancel encode both
     in ``order_id`` (e.g. ``"1:42"`` for market 1, order 42 on Lighter).
+
+    ``fill_price`` is the execution price of the order.  Brokers that cannot
+    return an exact fill price (e.g. Lighter, which only returns a tx hash)
+    populate this with the best bid/ask at submission time as a proxy.
+    ``None`` for cancel results.
     """
 
     order_id: str | None
     order: Order | None  # echo of the submitted order; None for cancels
     error: str | None
+    fill_price: Decimal | None = None
 
     @property
     def ok(self) -> bool:
         """``True`` when the transaction was accepted without error."""
         return self.error is None
+
+
+# ---------------------------------------------------------------------------
+# Fill confirmation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class FillConfirmation:
+    """Published by the consolidator back to each strategy worker after a fill.
+
+    ``fill_price`` is the actual broker execution price when an order was sent,
+    or the signal's reference price (bar close) when trades internally netted
+    and no broker order was placed.
+    """
+
+    strategy_id: str
+    symbol: str
+    quantity: Decimal  # signed: positive = bought, negative = sold
+    fill_price: Decimal
 
 
 # ---------------------------------------------------------------------------

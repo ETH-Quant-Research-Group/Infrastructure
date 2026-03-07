@@ -21,14 +21,24 @@ class ExampleStrategy(BaseStrategy):
 
     max_loss: ClassVar[Decimal] = Decimal("500")
 
+    def __init__(self) -> None:
+        self._long = True  # alternates each bar
+
     def on_bar(self, bar: AnyBar) -> TargetPosition | None:
+        from decimal import Decimal
+
+        from interfaces.signals import TargetPosition
+
+        qty = Decimal("0.001") if self._long else Decimal("-0.001")
+        self._long = not self._long
+
         log.info(
-            "[%s] BAR      close=%-12s  vol=%s",
+            "[%s] BAR      close=%-12s  target_qty=%s",
             self.__class__.__name__,
             bar.close,
-            bar.volume,
+            qty,
         )
-        return None
+        return TargetPosition(symbol="BTCUSDT", quantity=qty)
 
     def on_funding_rate(self, rate: FundingRate) -> TargetPosition | None:
         log.info(

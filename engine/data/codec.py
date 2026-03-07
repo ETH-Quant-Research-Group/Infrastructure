@@ -4,11 +4,12 @@ import dataclasses
 import json
 import types
 import typing
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, cast
 
 from data.types import DollarBar, FundingRate, TickBar, TimeBar, Trade, VolumeBar
+from execution.types import FillConfirmation, Order
 from interfaces.signals import TargetPosition
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ def encode_target(target: TargetPosition) -> bytes:
         {
             "symbol": target.symbol,
             "quantity": str(target.quantity),
+            "price": str(target.price),
             "strategy_id": target.strategy_id,
         }
     ).encode()
@@ -99,5 +101,62 @@ def decode_target(data: bytes) -> TargetPosition:
     return TargetPosition(
         symbol=d["symbol"],
         quantity=Decimal(d["quantity"]),
+        price=Decimal(d.get("price", "0")),
         strategy_id=d["strategy_id"],
     )
+
+
+def encode_fill(fill: FillConfirmation) -> bytes:
+    """Serialize a FillConfirmation to JSON bytes."""
+    return json.dumps(
+        {
+            "strategy_id": fill.strategy_id,
+            "symbol": fill.symbol,
+            "quantity": str(fill.quantity),
+            "fill_price": str(fill.fill_price),
+        }
+    ).encode()
+
+
+def decode_fill(data: bytes) -> FillConfirmation:
+    """Deserialize JSON bytes back to a FillConfirmation."""
+    d: dict[str, str] = json.loads(data)
+    return FillConfirmation(
+        strategy_id=d["strategy_id"],
+        symbol=d["symbol"],
+        quantity=Decimal(d["quantity"]),
+        fill_price=Decimal(d["fill_price"]),
+    )
+
+
+def encode_order(order: Order) -> bytes:
+    """Serialize an Order to JSON bytes."""
+    return json.dumps(
+        {
+            "symbol": order.symbol,
+            "side": order.side,
+            "order_type": order.order_type,
+            "quantity": str(order.quantity),
+            "price": str(order.price),
+        }
+    ).encode()
+
+
+def encode_pnl_snapshot(
+    strategy_id: str,
+    total_realized: object,
+    total_unrealized: object,
+    total: object,
+) -> bytes:
+    """Serialize a PnL snapshot to JSON bytes."""
+    from datetime import datetime
+
+    return json.dumps(
+        {
+            "strategy_id": strategy_id,
+            "total_realized": str(total_realized),
+            "total_unrealized": str(total_unrealized),
+            "total": str(total),
+            "timestamp": datetime.now(tz=UTC).isoformat(),
+        }
+    ).encode()

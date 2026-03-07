@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import os
 import pkgutil
@@ -28,6 +29,7 @@ from config import NATS_URL
 from engine.data import codec
 from engine.data.nats_bus import NatsBus
 from engine.strategy.guard import StrategyGuard
+from engine.strategy.pnl_calc import PnLCalc
 from engine.strategy.runner import StrategyRunner
 from interfaces.strategy import BaseStrategy
 
@@ -58,6 +60,51 @@ async def _forward_targets(
         await nc.publish(f"signals.targets.{t.strategy_id}", codec.encode_target(t))
 
 
+async def _listen_fills(
+    nc: nats.aio.client.Client,
+    strategy_id: str,
+    runner: StrategyRunner,
+) -> None:
+    """Subscribe to fill confirmations and feed them into the runner's PnLCalc."""
+    import nats.aio.msg as _nats_msg
+
+    async def _cb(msg: _nats_msg.Msg) -> None:
+        fill = codec.decode_fill(msg.data)
+        runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price)
+        await nc.publish(
+            f"pnl.{strategy_id}",
+            codec.encode_pnl_snapshot(
+                strategy_id,
+                runner.pnl_calc.total_realized,
+                runner.pnl_calc.total_unrealized,
+                runner.pnl_calc.total,
+            ),
+        )
+
+    await nc.subscribe(f"fills.{strategy_id}", cb=_cb)
+    await asyncio.get_running_loop().create_future()
+
+
+async def _publish_pnl_periodically(
+    nc: nats.aio.client.Client,
+    strategy_id: str,
+    runner: StrategyRunner,
+    interval: float = 5.0,
+) -> None:
+    """Publish unrealized PnL updates on a fixed interval."""
+    while True:
+        await asyncio.sleep(interval)
+        await nc.publish(
+            f"pnl.{strategy_id}",
+            codec.encode_pnl_snapshot(
+                strategy_id,
+                runner.pnl_calc.total_realized,
+                runner.pnl_calc.total_unrealized,
+                runner.pnl_calc.total,
+            ),
+        )
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -71,22 +118,36 @@ async def main() -> None:
     strategy_cls = _load_strategy(strategy_name)
     log.info("loaded strategy %s", strategy_cls.__name__)
 
+    strategy_id = strategy_cls.__name__
     bus = NatsBus()
     target_queue: asyncio.Queue[TargetPosition] = asyncio.Queue()
     guard = StrategyGuard(max_loss=strategy_cls.max_loss)
+    pnl_calc = PnLCalc()
 
     runner = StrategyRunner(
-        strategy_id=strategy_cls.__name__,
+        strategy_id=strategy_id,
         strategy=strategy_cls(),
         bus=bus,
         topics=strategy_cls.topics,
         target_queue=target_queue,
         guard=guard,
+        pnlcalc=pnl_calc,
     )
 
     nc = await nats.connect(NATS_URL)
     try:
         await bus.start(nc)
+
+        await nc.publish(
+            f"strategy.register.{strategy_cls.__name__}",
+            json.dumps(
+                {
+                    "name": strategy_cls.__name__,
+                    "topics": list(strategy_cls.topics),
+                    "max_loss": str(strategy_cls.max_loss),
+                }
+            ).encode(),
+        )
 
         # Request streams from feed_server for every topic this strategy needs.
         for topic in strategy_cls.topics:
@@ -98,7 +159,10 @@ async def main() -> None:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(runner.run())
             tg.create_task(_forward_targets(nc, target_queue))
+            tg.create_task(_listen_fills(nc, strategy_id, runner))
+            tg.create_task(_publish_pnl_periodically(nc, strategy_id, runner))
     finally:
+        await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")
         for topic in strategy_cls.topics:
             await nc.publish(f"control.unsubscribe.{topic}", b"")
         await nc.drain()

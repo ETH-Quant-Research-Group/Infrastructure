@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -17,6 +18,8 @@ from execution.types import (
     TimeInForce,
 )
 from interfaces.broker import BaseBroker
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from lighter.models.account_position import AccountPosition as _LighterPosition
@@ -130,6 +133,21 @@ class LighterBroker(BaseBroker):
             else SignerClient.NIL_TRIGGER_PRICE
         )
 
+        # Best bid/ask at submission time — used as fill price proxy for
+        # market orders since Lighter only returns a tx hash, not a fill price.
+        fill_price: Decimal | None = None
+        if order.order_type is OrderType.MARKET:
+            try:
+                if order.side is OrderSide.BUY:
+                    fill_price = await self.best_ask(order.symbol)
+                else:
+                    fill_price = await self.best_bid(order.symbol)
+            except Exception:
+                log.debug(
+                    "fill price fetch failed — PnL will use reference price",
+                    exc_info=True,
+                )
+
         _tx, resp, err = await self._signer.create_order(
             market_index,
             client_idx,
@@ -148,6 +166,7 @@ class LighterBroker(BaseBroker):
             order_id=resp.tx_hash if resp else None,
             order=order,
             error=None,
+            fill_price=fill_price,
         )
 
     async def cancel_order(self, order_id: str) -> OrderResult:
