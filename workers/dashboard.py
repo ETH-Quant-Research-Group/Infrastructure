@@ -32,6 +32,9 @@ async def _startup() -> None:
         format="%(asctime)s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Suppress uvicorn's per-connection lifecycle noise
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     nc = await nats.connect(NATS_URL)
     app.state.nc = nc
     await nats_bridge.start(nc)

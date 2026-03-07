@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from engine.strategy.guard import StrategyGuard
     from engine.strategy.pnl_calc import PnLCalc
     from engine.types import BusEvent, BusProtocol
+    from execution.types import FillConfirmation
     from interfaces.strategy import BaseStrategy
 
 
@@ -82,6 +83,11 @@ class StrategyRunner:
                 return self._strategy.on_funding_rate(event)
             case _:
                 return None
+
+    async def notify_fill(self, fill: FillConfirmation) -> None:
+        """Forward a fill confirmation to the strategy and emit any follow-up signal."""
+        result = self._strategy.on_fill(fill)
+        await self._emit(result)
 
     async def _emit(self, target: TargetPosition | None) -> None:
         if not self._guard.is_active:

@@ -15,6 +15,7 @@ to return your configured broker instance and matching order type before running
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -26,57 +27,101 @@ import nats.aio.msg
 from config import NATS_URL
 from engine.data import codec
 from engine.order.consolidator import OrderConsolidator
-from execution.types import FillConfirmation, Order, OrderSide, OrderType, PerpOrder
+from execution.types import (
+    FillConfirmation,
+    Order,
+    OrderResult,
+    OrderSide,
+    OrderType,
+    PerpOrder,
+    Position,
+)
+from interfaces.broker import BaseBroker
 
 if TYPE_CHECKING:
-    from interfaces.broker import BaseBroker
     from interfaces.signals import TargetPosition
 
 log = logging.getLogger(__name__)
 
 
-class _PaperBroker:
-    """Stub broker that logs orders instead of sending them to an exchange."""
+class _PaperPosition:
+    __slots__ = ("qty", "avg_entry", "realized_pnl", "last_price")
 
     def __init__(self) -> None:
-        self._positions: dict[str, Decimal] = {}
+        self.qty = Decimal(0)
+        self.avg_entry = Decimal(0)
+        self.realized_pnl = Decimal(0)
+        self.last_price = Decimal(0)
 
-    async def place_order(self, order: object) -> object:
-        from execution.types import OrderResult
 
+class _PaperBroker(BaseBroker):
+    """Stub broker that simulates fills locally without hitting an exchange.
+
+    Tracks average entry price and realized PnL the same way PnLCalc does.
+    Unrealized PnL is estimated using the last fill price as a market proxy.
+    """
+
+    def __init__(self) -> None:
+        self._positions: dict[str, _PaperPosition] = {}
+
+    async def place_order(self, order: Order) -> OrderResult:
         log.info("PAPER  place_order  %s", order)
-        assert isinstance(order, Order)
+
+        pos = self._positions.setdefault(order.symbol, _PaperPosition())
         delta = order.quantity if order.side == OrderSide.BUY else -order.quantity
-        self._positions[order.symbol] = (
-            self._positions.get(order.symbol, Decimal(0)) + delta
+        fill_price = order.price if order.price > Decimal(0) else pos.last_price
+        old_qty = pos.qty
+        new_qty = old_qty + delta
+
+        if old_qty == Decimal(0):
+            pos.avg_entry = fill_price
+        elif (old_qty > 0) == (delta > 0):
+            # Adding to position — update weighted average entry
+            total_cost = old_qty * pos.avg_entry + delta * fill_price
+            pos.avg_entry = total_cost / new_qty
+        else:
+            # Reducing or flipping — realize PnL on closed portion
+            closed = min(abs(delta), abs(old_qty))
+            if old_qty > 0:
+                pos.realized_pnl += (fill_price - pos.avg_entry) * closed
+            else:
+                pos.realized_pnl += (pos.avg_entry - fill_price) * closed
+            if new_qty == Decimal(0):
+                pos.avg_entry = Decimal(0)
+            elif (old_qty > 0) != (new_qty > 0):
+                pos.avg_entry = fill_price
+
+        pos.qty = new_qty
+        pos.last_price = fill_price
+        return OrderResult(
+            order_id="paper-0", order=order, error=None, fill_price=fill_price
         )
-        return OrderResult(order_id="paper-0", order=order, error=None)
 
-    async def cancel_order(self, order_id: str) -> object:
-        from execution.types import OrderResult
-
+    async def cancel_order(self, order_id: str) -> OrderResult:
         return OrderResult(order_id=order_id, order=None, error=None)
 
-    async def cancel_all_orders(self, symbol: str | None = None) -> object:
-        from execution.types import OrderResult
-
+    async def cancel_all_orders(self, symbol: str | None = None) -> OrderResult:
         return OrderResult(order_id=None, order=None, error=None)
 
-    async def open_orders(self, symbol: str | None = None) -> list:
+    async def open_orders(self, symbol: str | None = None) -> list[Order]:
         return []
 
-    async def position(self, symbol: str) -> object | None:
-        from execution.types import Position
-
-        qty = self._positions.get(symbol, Decimal(0))
-        if qty == Decimal(0):
+    async def position(self, symbol: str) -> Position | None:
+        pos = self._positions.get(symbol)
+        if pos is None or pos.qty == Decimal(0):
             return None
+
+        if pos.qty > 0:
+            unrealized = (pos.last_price - pos.avg_entry) * pos.qty
+        else:
+            unrealized = (pos.avg_entry - pos.last_price) * abs(pos.qty)
+
         return Position(
             symbol=symbol,
-            quantity=qty,
-            avg_entry_price=Decimal(0),
-            unrealized_pnl=Decimal(0),
-            realized_pnl=Decimal(0),
+            quantity=pos.qty,
+            avg_entry_price=pos.avg_entry,
+            unrealized_pnl=unrealized,
+            realized_pnl=pos.realized_pnl,
         )
 
     async def aclose(self) -> None:
@@ -84,7 +129,7 @@ class _PaperBroker:
 
 
 def _make_broker() -> BaseBroker:
-    return _PaperBroker()  # type: ignore[return-value]
+    return _PaperBroker()
 
 
 def _order_factory(
@@ -124,6 +169,36 @@ async def _publish_placed_orders(
         order = await placed_queue.get()
         await nc.publish(f"orders.placed.{order.symbol}", codec.encode_order(order))
         log.info("placed order: %s %s %s", order.side, order.quantity, order.symbol)
+
+
+async def _publish_positions(
+    nc: nats.aio.client.Client,
+    consolidator: OrderConsolidator,
+    broker: BaseBroker,
+    interval: float = 5.0,
+) -> None:
+    """Periodically query the broker for all tracked positions and broadcast."""
+    while True:
+        await asyncio.sleep(interval)
+        symbols = consolidator.tracked_symbols
+        if not symbols:
+            continue
+        snapshot: list[dict] = []
+        for symbol in symbols:
+            pos = await broker.position(symbol)
+            if pos is not None:
+                snapshot.append(
+                    {
+                        "symbol": pos.symbol,
+                        "quantity": str(pos.quantity),
+                        "avg_entry_price": str(pos.avg_entry_price),
+                        "unrealized_pnl": str(pos.unrealized_pnl),
+                        "realized_pnl": str(pos.realized_pnl),
+                    }
+                )
+        payload = json.dumps(snapshot).encode()
+        await nc.publish("positions.snapshot", payload)
+        log.debug("published positions snapshot: %d symbols", len(snapshot))
 
 
 async def _publish_fills(
@@ -169,6 +244,7 @@ async def main() -> None:
             tg.create_task(consolidator.run())
             tg.create_task(_publish_placed_orders(nc, placed_queue))
             tg.create_task(_publish_fills(nc, fills_queue))
+            tg.create_task(_publish_positions(nc, consolidator, broker))
     finally:
         await broker.aclose()
         await nc.drain()

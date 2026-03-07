@@ -68,6 +68,11 @@ class OrderConsolidator:
         # strategy_id → {symbol → cumulative position}
         self._positions: dict[str, dict[str, Decimal]] = defaultdict(dict)
 
+    @property
+    def tracked_symbols(self) -> set[str]:
+        """All symbols seen across all strategies."""
+        return {sym for pos in self._positions.values() for sym in pos}
+
     async def run(self) -> None:
         """Consume targets from the queue and reconcile until cancelled."""
         while True:

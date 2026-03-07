@@ -71,6 +71,7 @@ async def _listen_fills(
     async def _cb(msg: _nats_msg.Msg) -> None:
         fill = codec.decode_fill(msg.data)
         runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price)
+        await runner.notify_fill(fill)
         await nc.publish(
             f"pnl.{strategy_id}",
             codec.encode_pnl_snapshot(
@@ -83,6 +84,24 @@ async def _listen_fills(
 
     await nc.subscribe(f"fills.{strategy_id}", cb=_cb)
     await asyncio.get_running_loop().create_future()
+
+
+async def _publish_registration_periodically(
+    nc: nats.aio.client.Client,
+    strategy_cls: type[BaseStrategy],
+    interval: float = 30.0,
+) -> None:
+    """Re-broadcast strategy registration so the dashboard recovers after a restart."""
+    payload = json.dumps(
+        {
+            "name": strategy_cls.__name__,
+            "topics": list(strategy_cls.topics),
+            "max_loss": str(strategy_cls.max_loss),
+        }
+    ).encode()
+    while True:
+        await asyncio.sleep(interval)
+        await nc.publish(f"strategy.register.{strategy_cls.__name__}", payload)
 
 
 async def _publish_pnl_periodically(
@@ -161,6 +180,7 @@ async def main() -> None:
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
             tg.create_task(_publish_pnl_periodically(nc, strategy_id, runner))
+            tg.create_task(_publish_registration_periodically(nc, strategy_cls))
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")
         for topic in strategy_cls.topics:

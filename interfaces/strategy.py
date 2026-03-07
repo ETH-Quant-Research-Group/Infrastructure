@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from data.types import AnyBar, FundingRate, Trade
+    from execution.types import FillConfirmation
     from interfaces.signals import TargetPosition
 
 
@@ -53,6 +54,15 @@ class BaseStrategy(ABC):
 
     def on_funding_rate(self, rate: FundingRate) -> TargetPosition | None:  # noqa: B027
         """Called for each funding-rate update (optional override)."""
+        return None
+
+    def on_fill(self, fill: FillConfirmation) -> TargetPosition | None:  # noqa: B027
+        """Called when the consolidator confirms a fill for this strategy (optional).
+
+        Return a :class:`~interfaces.signals.TargetPosition` to immediately emit
+        a follow-up signal — useful for placing a spot hedge after a perp fill.
+        Return ``None`` for no further action.
+        """
         return None
 
     def on_stop(self) -> None:  # noqa: B027
