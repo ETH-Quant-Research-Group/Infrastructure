@@ -90,7 +90,7 @@ function StrategyFills({ strategyId }) {
         const res = await fetch(`/api/orders/strategy/${encodeURIComponent(strategyId)}`)
         const data = await res.json()
         setFills(data.fills ?? [])
-      } catch {}
+      } catch { }
     }
     fetchFills()
     const id = setInterval(fetchFills, POLL_MS)
@@ -202,16 +202,16 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
 
   const metrics = latest
     ? [
-        { label: 'Total PnL', value: latest.total },
-        { label: 'Realized', value: latest.total_realized },
-        { label: 'Unrealized', value: latest.total_unrealized },
-      ]
+      { label: 'Total PnL', value: latest.total },
+      { label: 'Realized', value: latest.total_realized },
+      { label: 'Unrealized', value: latest.total_unrealized },
+    ]
     : []
 
   const hasChart = chartData.total.length >= 2
 
   return (
-    <div className="flex gap-6">
+    <div className="flex gap-6 h-100">
       {/* Left: chart + metrics */}
       <div className="flex-1 min-w-0 flex flex-col gap-3">
         {/* Header */}
@@ -223,11 +223,10 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
                 <button
                   key={s.strategy_id}
                   onClick={() => setSelected(s.strategy_id)}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    selected === s.strategy_id
-                      ? 'bg-zinc-700 text-white'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}
+                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${selected === s.strategy_id
+                    ? 'bg-zinc-700 text-white'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
                 >
                   {s.strategy_id}
                 </button>
@@ -276,7 +275,7 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
       </div>
 
       {/* Right: fills panel */}
-      <div className="w-72 shrink-0 border-l border-zinc-900 pl-6">
+      <div className="w-72 shrink-0 border-l border-zinc-900 pl-6 overflow-scroll ">
         <StrategyFills strategyId={selected} />
       </div>
     </div>

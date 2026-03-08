@@ -17,7 +17,7 @@ function Home() {
         const res = await fetch('/api/performance/pnl')
         const data = await res.json()
         setStrategyIds((data.pnl ?? []).map(s => s.strategy_id))
-      } catch {}
+      } catch { }
     }
     fetchStrategies()
     const id = setInterval(fetchStrategies, 10000)
@@ -56,16 +56,16 @@ function Strategies() {
 }
 
 const ASSET_CLASSES = [
-  { key: 'all',         label: 'All'         },
-  { key: 'crypto',      label: 'Crypto'      },
-  { key: 'equities',    label: 'Equities'    },
-  { key: 'fx',          label: 'Forex'       },
+  { key: 'all', label: 'All' },
+  { key: 'crypto', label: 'Crypto' },
+  { key: 'equities', label: 'Equities' },
+  { key: 'fx', label: 'Forex' },
   { key: 'commodities', label: 'Commodities' },
-  { key: 'other',       label: 'Other'       },
+  { key: 'other', label: 'Other' },
 ]
 
 const CRYPTO_QUOTES = ['USDT', 'USDC', 'BUSD', 'PERP', 'USD']
-const CRYPTO_BASES  = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'MATIC', 'LINK', 'DOT', 'UNI']
+const CRYPTO_BASES = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'MATIC', 'LINK', 'DOT', 'UNI']
 const FX_CURRENCIES = ['EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'NZD', 'SEK', 'NOK']
 const COMMODITY_SYMS = ['GC', 'SI', 'CL', 'NG', 'HG', 'PL', 'ZC', 'ZS', 'ZW']
 
@@ -100,12 +100,27 @@ function pnlPct(p) {
   return isNaN(pct) ? null : pct
 }
 
-function PositionChart({ symbol, avgEntry }) {
-  const containerRef = useRef(null)
+const CHART_OPTS = {
+  layout: {
+    background: { color: '#0f0f0f' },
+    textColor: '#71757e',
+    fontFamily: 'Inter, system-ui, sans-serif',
+    fontSize: 11,
+  },
+  grid: { vertLines: { color: '#1c1c1c' }, horzLines: { color: '#1c1c1c' } },
+  crosshair: {
+    mode: 1,
+    vertLine: { color: '#444', labelBackgroundColor: '#1a1a1a' },
+    horzLine: { color: '#444', labelBackgroundColor: '#1a1a1a' },
+  },
+  rightPriceScale: { borderColor: '#1c1c1c', scaleMargins: { top: 0.15, bottom: 0.15 } },
+  timeScale: { borderColor: '#1c1c1c', timeVisible: true },
+}
+
+function useBars(symbol) {
   const [bars, setBars] = useState([])
   const [interval, setInterval_] = useState(null)
 
-  // First discover which interval is available for this symbol
   useEffect(() => {
     async function discoverInterval() {
       try {
@@ -114,7 +129,7 @@ function PositionChart({ symbol, avgEntry }) {
         const data = await res.json()
         const match = (data.pairs ?? []).find(p => p.symbol === symbol)
         if (match) setInterval_(match.interval)
-      } catch {}
+      } catch { }
     }
     discoverInterval()
     const id = setInterval(discoverInterval, 5000)
@@ -129,38 +144,53 @@ function PositionChart({ symbol, avgEntry }) {
         if (!res.ok) return
         const data = await res.json()
         setBars(data.bars ?? [])
-      } catch {}
+      } catch { }
     }
     fetchBars()
     const id = setInterval(fetchBars, 5000)
     return () => clearInterval(id)
   }, [symbol, interval])
 
+  return { bars, interval }
+}
+
+function PriceLineChart({ bars, avgEntry }) {
+  const containerRef = useRef(null)
+
   useEffect(() => {
     const el = containerRef.current
     if (!el || bars.length < 2) return
 
-    const chart = createChart(el, {
-      layout: {
-        background: { color: '#0f0f0f' },
-        textColor: '#71757e',
-        fontFamily: 'Inter, system-ui, sans-serif',
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: '#1c1c1c' },
-        horzLines: { color: '#1c1c1c' },
-      },
-      crosshair: {
-        mode: 1,
-        vertLine: { color: '#444', labelBackgroundColor: '#1a1a1a' },
-        horzLine: { color: '#444', labelBackgroundColor: '#1a1a1a' },
-      },
-      rightPriceScale: { borderColor: '#1c1c1c', scaleMargins: { top: 0.15, bottom: 0.15 } },
-      timeScale: { borderColor: '#1c1c1c', timeVisible: true },
-      width: el.clientWidth,
-      height: 240,
+    const chart = createChart(el, { ...CHART_OPTS, width: el.clientWidth, height: 180 })
+
+    const priceSeries = chart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 2 })
+    priceSeries.setData(bars.map(b => ({ time: b.time, value: b.close })))
+
+    const avgLine = chart.addSeries(LineSeries, {
+      color: '#facc15', lineWidth: 1, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     })
+    avgLine.setData(bars.map(b => ({ time: b.time, value: parseFloat(avgEntry) })))
+
+    chart.timeScale().fitContent()
+
+    const observer = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }))
+    observer.observe(el)
+    return () => { observer.disconnect(); chart.remove() }
+  }, [bars, avgEntry])
+
+  if (bars.length < 2) return null
+  return <div ref={containerRef} className="w-full" />
+}
+
+function CandleChart({ bars, avgEntry }) {
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el || bars.length < 2) return
+
+    const chart = createChart(el, { ...CHART_OPTS, width: el.clientWidth, height: 180 })
 
     const candles = chart.addSeries(CandlestickSeries, {
       upColor: '#26a69a', downColor: '#ef5350',
@@ -169,14 +199,9 @@ function PositionChart({ symbol, avgEntry }) {
     })
     candles.setData(bars)
 
-    // Avg entry price line
     const avgLine = chart.addSeries(LineSeries, {
-      color: '#facc15',
-      lineWidth: 1,
-      lineStyle: 1, // dashed
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
+      color: '#facc15', lineWidth: 1, lineStyle: 1,
+      priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     })
     avgLine.setData(bars.map(b => ({ time: b.time, value: parseFloat(avgEntry) })))
 
@@ -184,41 +209,42 @@ function PositionChart({ symbol, avgEntry }) {
 
     const observer = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }))
     observer.observe(el)
-
     return () => { observer.disconnect(); chart.remove() }
   }, [bars, avgEntry])
 
-  if (bars.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full text-zinc-600 text-xs">
-        {!interval ? 'No bar data received for this symbol yet' : 'Waiting for first bar…'}
-      </div>
-    )
-  }
-  return <div ref={containerRef} className="w-full h-full" />
+  if (bars.length < 2) return null
+  return <div ref={containerRef} className="w-full" />
 }
 
-function PositionDetail({ detail, qty, isLong, pct, upnl, rpnl, notional }) {
+function PositionDetail({ position: detail }) {
+  const qty = parseFloat(detail.quantity)
+  const isLong = qty >= 0
+  const upnl = fmtPnl(detail.unrealized_pnl)
+  const rpnl = fmtPnl(detail.realized_pnl)
+  const pct = pnlPct(detail)
+  const notional = Math.abs(qty) * parseFloat(detail.avg_entry_price)
+  const { bars, interval } = useBars(detail.symbol)
+  const hasData = bars.length >= 2
+  const [chartMode, setChartMode] = useState('Line')
+
   const stats = [
-    { label: 'Quantity',       value: Math.abs(qty).toLocaleString('en-US', { maximumFractionDigits: 6 }) },
-    { label: 'Notional',       value: `$${notional.toLocaleString('en-US', { maximumFractionDigits: 2 })}` },
-    { label: 'Realized PnL',   value: rpnl.text,  color: rpnl.color  },
-    { label: 'Unrealized PnL', value: upnl.text,  color: upnl.color  },
+    { label: 'Quantity', value: Math.abs(qty).toLocaleString('en-US', { maximumFractionDigits: 6 }) },
+    { label: 'Notional', value: `$${notional.toLocaleString('en-US', { maximumFractionDigits: 2 })}` },
+    { label: 'Realized PnL', value: rpnl.text, color: rpnl.color },
+    { label: 'Unrealized PnL', value: upnl.text, color: upnl.color },
   ]
 
   return (
-    <div className="rounded-xl border border-zinc-900 bg-[#0a0a0a] p-6 flex gap-6">
+    <div className={`rounded-xl border border-zinc-900 bg-[#0a0a0a] p-6 flex gap-6 ${detail.status === 'closed' ? 'opacity-50' : ''}`}>
       {/* Left: info */}
-      <div className="flex flex-col gap-5 w-80 shrink-0">
+      <div className="flex flex-col gap-5 w-72 shrink-0">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <h3 className="text-white text-2xl font-bold">{detail.symbol}</h3>
             {detail.status === 'closed' ? (
               <span className="text-xs font-semibold px-2 py-0.5 rounded bg-zinc-800 text-zinc-500">CLOSED</span>
             ) : (
-              <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                isLong ? 'bg-emerald-900/50 text-emerald-400' : 'bg-red-900/50 text-red-400'
-              }`}>
+              <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isLong ? 'bg-emerald-900/50 text-emerald-400' : 'bg-red-900/50 text-red-400'}`}>
                 {isLong ? 'LONG' : 'SHORT'}
               </span>
             )}
@@ -245,9 +271,36 @@ function PositionDetail({ detail, qty, isLong, pct, upnl, rpnl, notional }) {
         </div>
       </div>
 
-      {/* Right: chart */}
-      <div className="flex-1 min-w-0 min-h-[220px]">
-        <PositionChart symbol={detail.symbol} avgEntry={detail.avg_entry_price} />
+      {/* Right: toggleable line / candle chart */}
+      <div className="flex-1 min-w-0 flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex gap-1 bg-[#161616] rounded-md p-1">
+            {['Line', 'Candles'].map(mode => (
+              <button
+                key={mode}
+                onClick={() => setChartMode(mode)}
+                className={`px-3 py-1 rounded text-xs font-medium transition-colors border-0 cursor-pointer ${chartMode === mode ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+          {hasData && (
+            <div className="flex gap-4 text-xs text-zinc-500">
+              <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[#26a69a]" /> {chartMode === 'Line' ? 'Close price' : 'Price'}</span>
+              <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-[#facc15] opacity-70" /> Avg entry</span>
+            </div>
+          )}
+        </div>
+        {!hasData ? (
+          <div className="flex items-center justify-center flex-1 text-zinc-600 text-xs">
+            {!interval ? 'No bar data received for this symbol yet' : 'Waiting for first bar…'}
+          </div>
+        ) : chartMode === 'Line' ? (
+          <PriceLineChart bars={bars} avgEntry={detail.avg_entry_price} />
+        ) : (
+          <CandleChart bars={bars} avgEntry={detail.avg_entry_price} />
+        )}
       </div>
     </div>
   )
@@ -256,7 +309,6 @@ function PositionDetail({ detail, qty, isLong, pct, upnl, rpnl, notional }) {
 function Assets() {
   const [positions, setPositions] = useState([])
   const [assetClass, setAssetClass] = useState('all')
-  const [selected, setSelected] = useState(null)
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -264,9 +316,7 @@ function Assets() {
       try {
         const res = await fetch('/api/positions/')
         const data = await res.json()
-        const pos = data.positions ?? []
-        setPositions(pos)
-        setSelected(prev => prev ?? (pos[0]?.symbol ?? null))
+        setPositions(data.positions ?? [])
         setError(null)
       } catch {
         setError('API unreachable')
@@ -281,109 +331,77 @@ function Assets() {
     ? positions
     : positions.filter(p => classifySymbol(p.symbol) === assetClass)
 
-  const detail = positions.find(p => p.symbol === selected) ?? null
-  const qty = detail ? parseFloat(detail.quantity) : 0
-  const isLong = qty >= 0
-  const pct = detail ? pnlPct(detail) : null
-  const upnl = detail ? fmtPnl(detail.unrealized_pnl) : null
-  const rpnl = detail ? fmtPnl(detail.realized_pnl) : null
-  const notional = detail
-    ? Math.abs(parseFloat(detail.quantity)) * parseFloat(detail.avg_entry_price)
-    : 0
-
   return (
     <div className="flex flex-col gap-6">
-      {/* Asset class tabs */}
-      <div className="flex items-center gap-1 bg-[#111] border border-zinc-800 rounded-full px-1.5 py-1.5 w-fit">
-        {ASSET_CLASSES.map(ac => (
-          <button
-            key={ac.key}
-            onClick={() => setAssetClass(ac.key)}
-            className={`px-4 py-1 rounded-full text-sm font-medium transition-all border-0 cursor-pointer whitespace-nowrap ${
-              assetClass === ac.key
-                ? 'bg-zinc-700 text-white ring-1 ring-zinc-500'
-                : 'bg-transparent text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            {ac.label}
-          </button>
-        ))}
-        {error && <span className="ml-3 text-red-500 text-xs">{error}</span>}
+      {/* Sticky header: tabs + position cards */}
+      <div className="sticky top-0 z-10 bg-[#0f0f0f] pb-3 flex flex-col gap-4">
+        {/* Asset class tabs */}
+        <div className="flex items-center gap-1 bg-[#111] border border-zinc-800 rounded-full px-1.5 py-1.5 w-fit">
+          {ASSET_CLASSES.map(ac => (
+            <button
+              key={ac.key}
+              onClick={() => setAssetClass(ac.key)}
+              className={`px-4 py-1 rounded-full text-sm font-medium transition-all border-0 cursor-pointer whitespace-nowrap ${assetClass === ac.key
+                  ? 'bg-zinc-700 text-white ring-1 ring-zinc-500'
+                  : 'bg-transparent text-zinc-400 hover:text-zinc-200'
+                }`}
+            >
+              {ac.label}
+            </button>
+          ))}
+          {error && <span className="ml-3 text-red-500 text-xs">{error}</span>}
+        </div>
+
+        {/* Horizontal position cards */}
+        {filtered.length > 0 && (
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            {filtered.map(p => {
+              const pct = pnlPct(p)
+              const { text: pnlText, color: pnlCls } = fmtPnl(p.unrealized_pnl)
+              return (
+                <a
+                  key={p.symbol}
+                  href={`#pos-${p.symbol}`}
+                  className={`flex-shrink-0 flex flex-col gap-1.5 px-4 py-3 rounded-xl border text-left transition-colors no-underline w-44 ${
+                    p.status === 'closed' ? 'opacity-40' : ''
+                  } bg-[#111] border-zinc-900 hover:border-zinc-700`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
+                      {classifySymbol(p.symbol)}
+                    </span>
+                    {p.status === 'closed' ? (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">CLOSED</span>
+                    ) : (
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${parseFloat(p.quantity) >= 0 ? 'bg-emerald-900/50 text-emerald-400' : 'bg-red-900/50 text-red-400'}`}>
+                        {parseFloat(p.quantity) >= 0 ? 'LONG' : 'SHORT'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-white font-semibold text-[15px] leading-tight truncate">{p.symbol}</p>
+                  <p className="text-zinc-400 text-xs font-mono">${fmtPrice(p.avg_entry_price, 4)}</p>
+                  <p className={`text-sm font-semibold font-mono ${pnlCls}`}>
+                    {pnlText}
+                    {pct !== null && <span className="text-xs ml-1 opacity-75">({pct > 0 ? '+' : ''}{pct.toFixed(2)}%)</span>}
+                  </p>
+                </a>
+              )
+            })}
+          </div>
+        )}
       </div>
 
-      {/* Horizontal position cards */}
+      {/* Scrollable detail panels */}
       {filtered.length === 0 ? (
-        <p className="text-zinc-600 text-sm">No open positions in this class.</p>
+        <p className="text-zinc-600 text-sm">No positions in this class.</p>
       ) : (
-        <div className="flex gap-3 overflow-x-auto pb-1 scrollbar-thin">
-          {filtered.map(p => {
-            const pct = pnlPct(p)
-            const { text: pnlText, color: pnlCls } = fmtPnl(p.unrealized_pnl)
-            const isActive = selected === p.symbol
-            return (
-              <button
-                key={p.symbol}
-                onClick={() => setSelected(p.symbol)}
-                className={`flex-shrink-0 flex flex-col gap-1.5 px-4 py-3 rounded-xl border text-left transition-colors cursor-pointer w-44 ${
-                  p.status === 'closed' ? 'opacity-40' : ''
-                } ${
-                  isActive
-                    ? 'bg-zinc-800 border-zinc-600'
-                    : 'bg-[#111] border-zinc-900 hover:border-zinc-700'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
-                    {classifySymbol(p.symbol)}
-                  </span>
-                  {p.status === 'closed' ? (
-                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">
-                      CLOSED
-                    </span>
-                  ) : (
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
-                      parseFloat(p.quantity) >= 0
-                        ? 'bg-emerald-900/50 text-emerald-400'
-                        : 'bg-red-900/50 text-red-400'
-                    }`}>
-                      {parseFloat(p.quantity) >= 0 ? 'LONG' : 'SHORT'}
-                    </span>
-                  )}
-                </div>
-                <p className="text-white font-semibold text-[15px] leading-tight truncate">{p.symbol}</p>
-                <p className="text-zinc-400 text-xs font-mono">
-                  ${fmtPrice(p.avg_entry_price, 4)}
-                </p>
-                <p className={`text-sm font-semibold font-mono ${pnlCls}`}>
-                  {pnlText}
-                  {pct !== null && (
-                    <span className="text-xs ml-1 opacity-75">
-                      ({pct > 0 ? '+' : ''}{pct.toFixed(2)}%)
-                    </span>
-                  )}
-                </p>
-                {p.status === 'closed' && p.closed_at && (
-                  <p className="text-[10px] text-zinc-600">
-                    closed {new Date(p.closed_at).toLocaleTimeString()}
-                  </p>
-                )}
-              </button>
-            )
-          })}
+        <div className="flex flex-col gap-4">
+          {filtered.map(p => (
+            <div key={p.symbol} id={`pos-${p.symbol}`}>
+              <PositionDetail position={p} />
+            </div>
+          ))}
         </div>
-      )}
-
-      {/* Detail panel for selected position */}
-      {detail && (
-        <PositionDetail
-          detail={detail}
-          qty={qty}
-          isLong={isLong}
-          pct={pct}
-          upnl={upnl}
-          rpnl={rpnl}
-          notional={notional}
-        />
       )}
     </div>
   )

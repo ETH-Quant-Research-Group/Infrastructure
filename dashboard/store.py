@@ -200,6 +200,56 @@ def record_fill(data: dict) -> None:
         del history[: len(history) - _MAX_FILLS]
 
 
+class BrokerPnLRecord(TypedDict):
+    total_realized: str
+    total_unrealized: str
+    total: str
+    timestamp: str  # ISO-8601
+
+
+broker_pnl_latest: BrokerPnLRecord | None = None
+broker_pnl_history: list[BrokerPnLRecord] = []
+_MAX_BROKER_PNL_HISTORY = 1000
+
+
+# Per-exchange broker state, updated whenever broker.pnl.{exchange} arrives.
+broker_exchange_states: dict[str, dict] = {}
+
+
+def record_broker_exchange_pnl(data: dict) -> None:
+    exchange = str(data.get("exchange", ""))
+    if not exchange or exchange == "all":
+        return
+    state: dict = {
+        "exchange": exchange,
+        "total": str(data.get("total", "0")),
+        "total_realized": str(data.get("total_realized", "0")),
+        "total_unrealized": str(data.get("total_unrealized", "0")),
+        "last_seen": datetime.now(UTC).isoformat(),
+    }
+    if data.get("total_equity") is not None:
+        state["total_equity"] = str(data["total_equity"])
+    if data.get("total_wallet_balance") is not None:
+        state["total_wallet_balance"] = str(data["total_wallet_balance"])
+    if data.get("available_balance") is not None:
+        state["available_balance"] = str(data["available_balance"])
+    broker_exchange_states[exchange] = state
+
+
+def record_broker_pnl(data: dict) -> None:
+    global broker_pnl_latest
+    record: BrokerPnLRecord = {
+        "total_realized": str(data.get("total_realized", "0")),
+        "total_unrealized": str(data.get("total_unrealized", "0")),
+        "total": str(data.get("total", "0")),
+        "timestamp": str(data.get("timestamp", "")),
+    }
+    broker_pnl_latest = record
+    broker_pnl_history.append(record)
+    if len(broker_pnl_history) > _MAX_BROKER_PNL_HISTORY:
+        del broker_pnl_history[: len(broker_pnl_history) - _MAX_BROKER_PNL_HISTORY]
+
+
 def record_pnl(data: dict) -> None:
     sid = data["strategy_id"]
     record: PnLRecord = {

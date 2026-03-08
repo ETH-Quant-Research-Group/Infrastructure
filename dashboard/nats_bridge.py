@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 from dashboard.store import (
     record_bar,
+    record_broker_exchange_pnl,
+    record_broker_pnl,
     record_fill,
     record_order,
     record_pnl,
@@ -37,6 +39,7 @@ _SUBSCRIPTIONS = [
     "positions.>",
     "strategy.>",
     "pnl.>",
+    "broker.>",
 ]
 
 
@@ -66,6 +69,10 @@ async def start(nc: nats.aio.client.Client) -> None:
             record_pnl(data)
         elif msg.subject == "positions.snapshot" and isinstance(data, list):
             record_positions(data)
+        elif msg.subject == "broker.pnl" and isinstance(data, dict):
+            record_broker_pnl(data)
+        elif msg.subject.startswith("broker.pnl.") and isinstance(data, dict):
+            record_broker_exchange_pnl(data)
 
         await manager.broadcast({"subject": msg.subject, "data": data})
 

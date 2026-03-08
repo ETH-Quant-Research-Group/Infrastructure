@@ -39,7 +39,7 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
   const fwdAId = `${uid}-fwd-a`
 
   return (
-    <svg width={W} height={totalH} className="shrink-0 overflow-visible" style={{ alignSelf: 'flex-start' }}>
+    <svg width={W} height={totalH} className="shrink-0 overflow-visible" style={{ alignSelf: 'center' }}>
       <defs>
         <marker id={fwdId} markerWidth="6" markerHeight="5" refX="5" refY="2.5" orient="auto">
           <polygon points="0 0,6 2.5,0 5" fill="#3d5268" />
@@ -127,14 +127,14 @@ function Badge({ label, active }) {
   )
 }
 
-function FeedServerNode({ liveSubjects, isActive }) {
+function FeedServerNode({ publishedSubjects, isActive }) {
   return (
     <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-56">
       <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">Feed Server</div>
       <div className="text-[0.72rem] text-zinc-500 mb-1">Publishing:</div>
       <div className="flex flex-col gap-1 mb-3">
-        {liveSubjects.length > 0
-          ? liveSubjects.map(s => <Badge key={s} label={s} active={true} />)
+        {publishedSubjects.length > 0
+          ? publishedSubjects.map(s => <Badge key={s} label={s} active={isActive(s, FEED_TTL)} />)
           : <span className="text-[0.72rem] text-zinc-700 italic">idle</span>
         }
       </div>
@@ -149,7 +149,7 @@ function FeedServerNode({ liveSubjects, isActive }) {
 }
 
 function StrategyNode({ strategy, isActive }, ref) {
-  const guardActive = isActive(`signals.targets.${strategy.name}`, GUARD_TTL)
+  const guardActive = isActive(`strategy.heartbeat.${strategy.name}`, GUARD_TTL)
   return (
     <div ref={ref} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-72">
       <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-1">
@@ -181,7 +181,7 @@ function StrategyNode({ strategy, isActive }, ref) {
   )
 }
 const StrategyNodeRef = ({ strategy, isActive, nodeRef }) => {
-  const guardActive = isActive(`signals.targets.${strategy.name}`, GUARD_TTL)
+  const guardActive = isActive(`strategy.heartbeat.${strategy.name}`, GUARD_TTL)
   return (
     <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-72">
       <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-1">StrategyRunner</div>
@@ -226,15 +226,44 @@ function ConsolidatorNode({ topology, isActive }) {
   )
 }
 
-function BrokerNode({ recentOrders }) {
+function BrokerNode({ broker, recentOrders, nodeRef }) {
+  const fmt = v => {
+    const n = parseFloat(v ?? 0)
+    return (n >= 0 ? '+' : '') + n.toFixed(4)
+  }
+  const total = parseFloat(broker?.total ?? 0)
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-52">
-      <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">Broker</div>
+    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-52">
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${broker?.active ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+        <div className="text-xs font-semibold text-zinc-300 uppercase tracking-wider truncate">
+          {broker?.exchange ?? 'Broker'}
+        </div>
+      </div>
+      {broker && (
+        <div className="mb-3 border border-zinc-800 rounded p-2 bg-zinc-950 space-y-1">
+          {broker.total_equity != null && (
+            <div className="flex justify-between items-baseline">
+              <span className="text-[0.65rem] text-zinc-500 font-mono">AUM</span>
+              <span className="text-sm font-mono font-semibold text-white">${parseFloat(broker.total_equity).toFixed(2)}</span>
+            </div>
+          )}
+          <div className="flex justify-between items-baseline">
+            <span className="text-[0.65rem] text-zinc-500 font-mono">PnL</span>
+            <span className={`text-sm font-mono font-semibold ${total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(broker.total)}</span>
+          </div>
+          <div className="text-[0.65rem] text-zinc-500 font-mono">R: {fmt(broker.total_realized)}</div>
+          <div className="text-[0.65rem] text-zinc-500 font-mono">U: {fmt(broker.total_unrealized)}</div>
+          {broker.available_balance != null && (
+            <div className="text-[0.65rem] text-zinc-500 font-mono">Avail: ${parseFloat(broker.available_balance).toFixed(2)}</div>
+          )}
+        </div>
+      )}
       {recentOrders.length === 0 ? (
         <div className="text-zinc-600 text-[0.72rem]">No recent orders</div>
       ) : (
         <div className="flex flex-col gap-1.5">
-          {recentOrders.slice(0, 8).map((o, i) => (
+          {recentOrders.slice(0, 5).map((o, i) => (
             <div key={i} className="text-[0.72rem] font-mono bg-zinc-800 rounded px-2 py-1">
               <span className={o.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{o.side}</span>
               {' '}<span className="text-zinc-300">{o.symbol}</span>
@@ -277,13 +306,16 @@ function SingleArrow({ subjects, isActive }) {
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export default function Network() {
-  const [topology, setTopology]       = useState(null)
-  const [recentOrders, setRecentOrders] = useState([])
-  const [nodeHeights, setNodeHeights] = useState([])
-  const activityRef  = useRef({})
-  const nodeRefs     = useRef([])
-  const [now, setNow]       = useState(Date.now())
+  const [topology, setTopology]           = useState(null)
+  const [recentOrders, setRecentOrders]   = useState({})
+  const [nodeHeights, setNodeHeights]     = useState([])
+  const [brokerHeights, setBrokerHeights] = useState([])
+  const activityRef    = useRef({})
+  const nodeRefs       = useRef([])
+  const brokerRefs     = useRef([])
+  const [now, setNow]           = useState(Date.now())
   const [wsStatus, setWsStatus] = useState('connecting')
+  const fetchTopologyRef = useRef(null)
 
   useEffect(() => {
     function fetchTopology() {
@@ -292,6 +324,7 @@ export default function Network() {
         .then(setTopology)
         .catch(() => {})
     }
+    fetchTopologyRef.current = fetchTopology
     fetchTopology()
     const id = setInterval(fetchTopology, 5000)
     return () => clearInterval(id)
@@ -302,6 +335,15 @@ export default function Network() {
     const next = nodeRefs.current.filter(Boolean).map(el => el.getBoundingClientRect().height)
     if (next.length === 0) return
     setNodeHeights(prev =>
+      prev.length === next.length && prev.every((h, i) => h === next[i]) ? prev : next
+    )
+  })
+
+  // Measure broker node heights
+  useLayoutEffect(() => {
+    const next = brokerRefs.current.filter(Boolean).map(el => el.getBoundingClientRect().height)
+    if (next.length === 0) return
+    setBrokerHeights(prev =>
       prev.length === next.length && prev.every((h, i) => h === next[i]) ? prev : next
     )
   })
@@ -324,8 +366,17 @@ export default function Network() {
         try {
           const msg = JSON.parse(e.data)
           if (msg.subject) activityRef.current[msg.subject] = Date.now()
-          if (msg.subject?.startsWith('orders.placed.') && msg.data)
-            setRecentOrders(prev => [msg.data, ...prev].slice(0, 10))
+          if (msg.subject?.startsWith('orders.placed.') && msg.data) {
+            const exchange = msg.subject.split('.')[2]
+            if (exchange) {
+              setRecentOrders(prev => ({
+                ...prev,
+                [exchange]: [msg.data, ...(prev[exchange] ?? [])].slice(0, 10),
+              }))
+            }
+          }
+          if (msg.subject?.startsWith('strategy.register.') || msg.subject?.startsWith('strategy.unregister.'))
+            fetchTopologyRef.current?.()
         } catch {}
       }
     }
@@ -340,19 +391,29 @@ export default function Network() {
     )
   }
 
-  const liveSubjects = [...new Set(
-    Object.entries(activityRef.current)
-      .filter(([s, ts]) => (s.startsWith('futures.') || s.startsWith('spot.')) && now - ts < FEED_TTL)
-      .map(([s]) => s)
-  )].sort()
-
   const strategies = topology?.strategies ?? []
-  const n = strategies.length
+  const brokers    = topology?.brokers    ?? []
+  const n  = strategies.length
+  const nb = brokers.length
+
+  // All topics any strategy subscribes to — the feed server must be publishing these.
+  // Fall back to live traffic if topology hasn't loaded yet.
+  const publishedSubjects = strategies.length > 0
+    ? [...new Set(strategies.flatMap(s => s.topics ?? []))].sort()
+    : [...new Set(
+        Object.entries(activityRef.current)
+          .filter(([s, ts]) => (s.startsWith('futures.') || s.startsWith('spot.')) && now - ts < FEED_TTL)
+          .map(([s]) => s)
+      )].sort()
 
   // Heights to use: measured or estimated (160px per node)
   const heights = nodeHeights.length === n && n > 0
     ? nodeHeights
     : strategies.map(() => 160)
+
+  const bHeights = brokerHeights.length === nb && nb > 0
+    ? brokerHeights
+    : brokers.map(() => 180)
 
   return (
     <div className="flex flex-col min-h-full">
@@ -372,7 +433,7 @@ export default function Network() {
       <div className="flex items-center overflow-x-auto">
 
         {/* Feed server */}
-        <FeedServerNode liveSubjects={liveSubjects} isActive={isActive} />
+        <FeedServerNode publishedSubjects={publishedSubjects} isActive={isActive} />
 
         {/* Feed → strategies fan */}
         {n > 1 ? (
@@ -385,7 +446,7 @@ export default function Network() {
           />
         ) : (
           <SingleArrow
-            subjects={strategies[0]?.topics ?? liveSubjects}
+            subjects={strategies[0]?.topics ?? publishedSubjects}
             isActive={isActive}
           />
         )}
@@ -424,11 +485,33 @@ export default function Network() {
         {/* Consolidator */}
         <ConsolidatorNode topology={topology} isActive={isActive} />
 
-        {/* Consolidator → broker */}
-        <SingleArrow subjects={['orders.placed.*']} isActive={isActive} />
+        {/* Consolidator → broker(s) */}
+        {nb > 1 ? (
+          <FanSvg
+            heights={bHeights}
+            getTopics={() => ['orders.placed.*']}
+            fanIn={false}
+            isActive={isActive}
+            uid="cons-broker"
+          />
+        ) : (
+          <SingleArrow subjects={['orders.placed.*']} isActive={isActive} />
+        )}
 
-        {/* Broker */}
-        <BrokerNode recentOrders={recentOrders} />
+        {/* Broker column */}
+        <div className="flex flex-col shrink-0" style={{ gap: NODE_GAP }}>
+          {nb > 0
+            ? brokers.map((b, i) => (
+                <BrokerNode
+                  key={b.exchange}
+                  broker={b}
+                  recentOrders={recentOrders[b.exchange] ?? []}
+                  nodeRef={el => { brokerRefs.current[i] = el }}
+                />
+              ))
+            : <BrokerNode broker={null} recentOrders={[]} nodeRef={el => { brokerRefs.current[0] = el }} />
+          }
+        </div>
       </div>
     </div>
   )
