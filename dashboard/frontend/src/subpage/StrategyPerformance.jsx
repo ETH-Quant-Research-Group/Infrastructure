@@ -1,34 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import { createChart, LineSeries } from 'lightweight-charts'
+import { useTheme, th } from '../theme'
 
 const API_BASE = '/api/performance'
 const POLL_MS = 5000
 
 function PnLChart({ data }) {
   const containerRef = useRef(null)
+  const isDark = useTheme()
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
 
+    const c = th(isDark)
     const chart = createChart(el, {
       layout: {
-        background: { color: '#0f0f0f' },
-        textColor: '#71757e',
+        background: { color: c.chartBg },
+        textColor: c.chartText,
         fontFamily: 'Inter, system-ui, sans-serif',
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: '#1c1c1c' },
-        horzLines: { color: '#1c1c1c' },
+        vertLines: { color: c.chartGrid },
+        horzLines: { color: c.chartGrid },
       },
       crosshair: {
         mode: 1,
-        vertLine: { color: '#444', labelBackgroundColor: '#1a1a1a' },
-        horzLine: { color: '#444', labelBackgroundColor: '#1a1a1a' },
+        vertLine: { color: c.chartXhair, labelBackgroundColor: c.chartLabel },
+        horzLine: { color: c.chartXhair, labelBackgroundColor: c.chartLabel },
       },
-      rightPriceScale: { borderColor: '#1c1c1c', scaleMargins: { top: 0.15, bottom: 0.15 } },
-      timeScale: { borderColor: '#1c1c1c', timeVisible: true },
+      rightPriceScale: { borderColor: c.chartBorder, scaleMargins: { top: 0.15, bottom: 0.15 } },
+      timeScale: { borderColor: c.chartBorder, timeVisible: true },
       width: el.clientWidth,
       height: 280,
     })
@@ -50,7 +53,7 @@ function PnLChart({ data }) {
     observer.observe(el)
 
     return () => { observer.disconnect(); chart.remove() }
-  }, [data])
+  }, [data, isDark])
 
   return <div ref={containerRef} className="w-full" />
 }
@@ -81,6 +84,8 @@ function pnlColor(v) {
 }
 
 function StrategyFills({ strategyId }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   const [fills, setFills] = useState([])
 
   useEffect(() => {
@@ -99,34 +104,34 @@ function StrategyFills({ strategyId }) {
 
   return (
     <div className="flex flex-col h-full">
-      <p className="text-white font-bold font-notion-inter mb-3 text-lg">Fills</p>
+      <p className={`${c.t1} font-bold font-notion-inter mb-3 text-lg`}>Fills</p>
       <div className="overflow-y-auto flex-1">
         {fills.length === 0 ? (
-          <p className="text-zinc-700 text-xs">No fills yet.</p>
+          <p className={`${c.t5} text-xs`}>No fills yet.</p>
         ) : (
-          <div className="flex flex-col divide-y divide-zinc-800/60">
+          <div className={`flex flex-col ${c.divide} divide-y`}>
             {fills.map((f, i) => {
               const qty = parseFloat(f.quantity)
               const isBuy = qty > 0
               return (
                 <div
                   key={i}
-                  className="grid py-3 px-2 hover:bg-zinc-900/40 transition-colors rounded font-notion-inter"
+                  className={`grid py-3 px-2 ${c.hover} transition-colors rounded font-notion-inter`}
                   style={{ gridTemplateColumns: '1fr auto auto' }}
                 >
                   <div className="flex flex-col gap-1">
-                    <span className="text-[14px] font-medium text-zinc-100 leading-tight">{f.symbol}</span>
-                    <span className="text-[11px] text-zinc-600 leading-tight">{new Date(f.filled_at).toLocaleTimeString()}</span>
+                    <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{f.symbol}</span>
+                    <span className={`text-[11px] ${c.t4} leading-tight`}>{new Date(f.filled_at).toLocaleTimeString()}</span>
                   </div>
                   <div className="flex flex-col items-end gap-1 pr-3">
                     <span className={`text-[13px] font-medium leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
                       {isBuy ? 'BUY' : 'SELL'}
                     </span>
-                    <span className="text-[11px] text-zinc-500 leading-tight">fill</span>
+                    <span className={`text-[11px] ${c.t3} leading-tight`}>fill</span>
                   </div>
                   <div className="flex flex-col items-end gap-1">
-                    <span className="text-[14px] font-medium text-zinc-200 leading-tight">{Math.abs(qty)}</span>
-                    <span className="text-[11px] text-zinc-600 leading-tight">
+                    <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{Math.abs(qty)}</span>
+                    <span className={`text-[11px] ${c.t4} leading-tight`}>
                       {f.fill_price === '0' ? 'MKT' : parseFloat(f.fill_price).toLocaleString('en-US', { maximumFractionDigits: 4 })}
                     </span>
                   </div>
@@ -140,8 +145,9 @@ function StrategyFills({ strategyId }) {
   )
 }
 
-// strategyId — if provided, locks to that strategy (no selector shown)
 export default function StrategyPerformance({ strategyId: lockedId }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   const [strategies, setStrategies] = useState([])
   const [selected, setSelected] = useState(lockedId ?? null)
   const [latest, setLatest] = useState(null)
@@ -150,7 +156,6 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
   const [error, setError] = useState(null)
   const everLoadedRef = useRef(false)
 
-  // Only fetch the full list when not locked to a specific strategy
   useEffect(() => {
     if (lockedId) return
     async function fetchAll() {
@@ -169,7 +174,6 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
     return () => clearInterval(id)
   }, [lockedId])
 
-  // Poll selected strategy detail
   useEffect(() => {
     if (!selected) return
     setError(null)
@@ -214,19 +218,15 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
     <div className="flex gap-6 h-100">
       {/* Left: chart + metrics */}
       <div className="flex-1 min-w-0 flex flex-col gap-3">
-        {/* Header */}
         <div className="flex items-center justify-between">
-          <h3 className="text-white font-semibold text-lg">{selected ?? '—'}</h3>
+          <h3 className={`${c.t1} font-semibold text-lg`}>{selected ?? '—'}</h3>
           {!lockedId && strategies.length > 0 && (
-            <div className="flex gap-1 bg-[#161616] rounded-md p-1">
+            <div className={`flex gap-1 ${c.togBg} rounded-md p-1`}>
               {strategies.map(s => (
                 <button
                   key={s.strategy_id}
                   onClick={() => setSelected(s.strategy_id)}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${selected === s.strategy_id
-                    ? 'bg-zinc-700 text-white'
-                    : 'text-zinc-500 hover:text-zinc-300'
-                    }`}
+                  className={`px-3 py-1 rounded text-xs font-medium transition-colors border-0 cursor-pointer ${selected === s.strategy_id ? c.togA : c.togI}`}
                 >
                   {s.strategy_id}
                 </button>
@@ -235,26 +235,24 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
           )}
         </div>
 
-        {/* Metric cards */}
         {metrics.length > 0 && (
           <div className="grid grid-cols-3 gap-3">
             {metrics.map(m => (
-              <div key={m.label} className="bg-[#111] rounded-lg p-3 border border-zinc-900">
-                <p className="text-zinc-500 text-xs mb-1">{m.label}</p>
+              <div key={m.label} className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
+                <p className={`${c.t3} text-xs mb-1`}>{m.label}</p>
                 <p className={`text-base font-semibold font-mono ${pnlColor(m.value)}`}>{fmt(m.value)}</p>
               </div>
             ))}
           </div>
         )}
 
-        {/* Chart */}
         <div className="rounded-lg overflow-hidden">
           {error ? (
-            <div className="flex items-center justify-center h-40 text-zinc-600 text-sm">{error}</div>
+            <div className={`flex items-center justify-center h-40 ${c.t4} text-sm`}>{error}</div>
           ) : !selected ? (
-            <div className="flex items-center justify-center h-40 text-zinc-600 text-sm">No active strategies</div>
+            <div className={`flex items-center justify-center h-40 ${c.t4} text-sm`}>No active strategies</div>
           ) : !hasChart ? (
-            <div className="flex items-center justify-center h-40 text-zinc-600 text-sm">
+            <div className={`flex items-center justify-center h-40 ${c.t4} text-sm`}>
               {loading ? 'Loading…' : 'Waiting for PnL history…'}
             </div>
           ) : (
@@ -263,7 +261,7 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
         </div>
 
         {hasChart && (
-          <div className="flex gap-4 text-xs text-zinc-500">
+          <div className={`flex gap-4 text-xs ${c.t3}`}>
             <span className="flex items-center gap-1.5">
               <span className="inline-block w-4 h-0.5 bg-[#26a69a]" /> Total PnL
             </span>
@@ -275,7 +273,7 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
       </div>
 
       {/* Right: fills panel */}
-      <div className="w-72 shrink-0 border-l border-zinc-900 pl-6 overflow-scroll ">
+      <div className={`w-72 shrink-0 border-l ${c.b1} pl-6 overflow-scroll`}>
         <StrategyFills strategyId={selected} />
       </div>
     </div>
