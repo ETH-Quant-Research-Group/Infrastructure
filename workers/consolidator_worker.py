@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING, Any
 import nats
 import nats.aio.client
 import nats.aio.msg
-from execution.brokers.bybit_paper import BybitPaperBroker
 
 from config import NATS_URL
 from engine.data import codec
@@ -48,7 +47,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_paper").lower()
+_DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_demo").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +60,6 @@ _DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_paper").lower()
 def _build_brokers() -> dict[str, BaseBroker]:
     """Instantiate every broker that should be active for this run."""
     brokers: dict[str, BaseBroker] = {
-        "bybit_paper": BybitPaperBroker(),
         "paper": PaperBroker(),
         "bybit_demo": BybitBroker(
             demo=True

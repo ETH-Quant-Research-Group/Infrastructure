@@ -18,5 +18,5 @@ app.include_router(performance.router, prefix="/api/performance", tags=["perform
 app.include_router(topology.router, prefix="/api/topology", tags=["topology"])
 app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 
-_FRONTEND = Path(__file__).parent / "frontend"
+_FRONTEND = Path(__file__).parent / "frontend" / "dist"
 app.mount("/", StaticFiles(directory=_FRONTEND, html=True), name="frontend")
