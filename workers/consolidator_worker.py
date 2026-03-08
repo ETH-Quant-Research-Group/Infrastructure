@@ -1,4 +1,4 @@
-"""Consolidator worker — nets strategy signals and places broker orders.
+"""Consolidator worker — nets strategy signals and routes broker orders.
 
 Run with::
 
@@ -6,10 +6,18 @@ Run with::
 
 Environment variables:
 
-- ``NATS_URL`` (default: ``nats://localhost:4222``)
+- ``NATS_URL``          (default: ``nats://localhost:4222``)
+- ``DEFAULT_EXCHANGE``  (default: ``bybit_paper``)  — exchange used when a
+                        strategy signal carries no ``exchange`` field.
 
-**Broker configuration**: edit ``_make_broker()`` and ``_order_factory()`` below
-to return your configured broker instance and matching order type before running.
+Available exchanges (add more in ``_build_brokers()``):
+
+    bybit_paper   BybitPaperBroker  — paper fills at live Bybit bid/ask
+    paper         PaperBroker       — fills at last bar close, no fees
+
+Strategies select an exchange by setting ``exchange="lighter"`` (or any other
+registered name) on the :class:`~interfaces.signals.TargetPosition` they emit.
+Signals with no exchange default to ``DEFAULT_EXCHANGE``.
 """
 
 from __future__ import annotations
@@ -17,129 +25,69 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nats
 import nats.aio.client
 import nats.aio.msg
+from execution.brokers.bybit_paper import BybitPaperBroker
 
 from config import NATS_URL
 from engine.data import codec
 from engine.order.consolidator import OrderConsolidator
-from execution.types import (
-    FillConfirmation,
-    Order,
-    OrderResult,
-    OrderSide,
-    OrderType,
-    PerpOrder,
-    Position,
-)
-from interfaces.broker import BaseBroker
+from execution.brokers.bybit import BybitBroker
+from execution.brokers.paper import PaperBroker
+from execution.types import FillConfirmation, Order, OrderSide, OrderType, PerpOrder
 
 if TYPE_CHECKING:
+    from interfaces.broker import BaseBroker
     from interfaces.signals import TargetPosition
 
 log = logging.getLogger(__name__)
 
-
-class _PaperPosition:
-    __slots__ = ("qty", "avg_entry", "realized_pnl", "last_price")
-
-    def __init__(self) -> None:
-        self.qty = Decimal(0)
-        self.avg_entry = Decimal(0)
-        self.realized_pnl = Decimal(0)
-        self.last_price = Decimal(0)
+_DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_paper").lower()
 
 
-class _PaperBroker(BaseBroker):
-    """Stub broker that simulates fills locally without hitting an exchange.
-
-    Tracks average entry price and realized PnL the same way PnLCalc does.
-    Unrealized PnL is estimated using the last fill price as a market proxy.
-    """
-
-    def __init__(self) -> None:
-        self._positions: dict[str, _PaperPosition] = {}
-
-    async def place_order(self, order: Order) -> OrderResult:
-        log.info("PAPER  place_order  %s", order)
-
-        pos = self._positions.setdefault(order.symbol, _PaperPosition())
-        delta = order.quantity if order.side == OrderSide.BUY else -order.quantity
-        fill_price = order.price if order.price > Decimal(0) else pos.last_price
-        old_qty = pos.qty
-        new_qty = old_qty + delta
-
-        if old_qty == Decimal(0):
-            pos.avg_entry = fill_price
-        elif (old_qty > 0) == (delta > 0):
-            # Adding to position — update weighted average entry
-            total_cost = old_qty * pos.avg_entry + delta * fill_price
-            pos.avg_entry = total_cost / new_qty
-        else:
-            # Reducing or flipping — realize PnL on closed portion
-            closed = min(abs(delta), abs(old_qty))
-            if old_qty > 0:
-                pos.realized_pnl += (fill_price - pos.avg_entry) * closed
-            else:
-                pos.realized_pnl += (pos.avg_entry - fill_price) * closed
-            if new_qty == Decimal(0):
-                pos.avg_entry = Decimal(0)
-            elif (old_qty > 0) != (new_qty > 0):
-                pos.avg_entry = fill_price
-
-        pos.qty = new_qty
-        pos.last_price = fill_price
-        return OrderResult(
-            order_id="paper-0", order=order, error=None, fill_price=fill_price
-        )
-
-    async def cancel_order(self, order_id: str) -> OrderResult:
-        return OrderResult(order_id=order_id, order=None, error=None)
-
-    async def cancel_all_orders(self, symbol: str | None = None) -> OrderResult:
-        return OrderResult(order_id=None, order=None, error=None)
-
-    async def open_orders(self, symbol: str | None = None) -> list[Order]:
-        return []
-
-    async def position(self, symbol: str) -> Position | None:
-        pos = self._positions.get(symbol)
-        if pos is None or pos.qty == Decimal(0):
-            return None
-
-        if pos.qty > 0:
-            unrealized = (pos.last_price - pos.avg_entry) * pos.qty
-        else:
-            unrealized = (pos.avg_entry - pos.last_price) * abs(pos.qty)
-
-        return Position(
-            symbol=symbol,
-            quantity=pos.qty,
-            avg_entry_price=pos.avg_entry,
-            unrealized_pnl=unrealized,
-            realized_pnl=pos.realized_pnl,
-        )
-
-    async def aclose(self) -> None:
-        pass
+# ---------------------------------------------------------------------------
+# Broker registry
+#
+# Add new brokers here.  Key = exchange name used in TargetPosition.exchange.
+# ---------------------------------------------------------------------------
 
 
-def _make_broker() -> BaseBroker:
-    return _PaperBroker()
+def _build_brokers() -> dict[str, BaseBroker]:
+    """Instantiate every broker that should be active for this run."""
+    brokers: dict[str, BaseBroker] = {
+        "bybit_paper": BybitPaperBroker(),
+        "paper": PaperBroker(),
+        "bybit_demo": BybitBroker(
+            demo=True
+        ),  # requires BYBIT_API_KEY + BYBIT_API_SECRET
+        # "bybit":      BybitBroker(demo=False),  # live trading — be careful
+    }
+    log.info(
+        "Active brokers: %s  |  default: %s",
+        list(brokers),
+        _DEFAULT_EXCHANGE,
+    )
+    return brokers
+
+
+# ---------------------------------------------------------------------------
+# Order factory
+#
+# Returns the correct Order subtype for the target exchange.
+# For cross-exchange strategies, inspect `symbol` or add an `exchange` arg
+# and return EquityOrder / FXOrder as needed.
+# ---------------------------------------------------------------------------
 
 
 def _order_factory(
     symbol: str, side: OrderSide, quantity: Decimal, price: Decimal
 ) -> Order:
-    """Produce the correct order type for the configured broker.
-
-    price=0 → market order, price>0 → limit order.
-    Swap PerpOrder for EquityOrder / FXOrder when connecting a different broker.
-    """
     order_type = OrderType.LIMIT if price > Decimal(0) else OrderType.MARKET
     return PerpOrder(
         symbol=symbol,
@@ -148,6 +96,11 @@ def _order_factory(
         quantity=quantity,
         price=price,
     )
+
+
+# ---------------------------------------------------------------------------
+# NATS coroutines
+# ---------------------------------------------------------------------------
 
 
 async def _bridge_targets(
@@ -163,42 +116,104 @@ async def _bridge_targets(
 
 async def _publish_placed_orders(
     nc: nats.aio.client.Client,
-    placed_queue: asyncio.Queue[Order],
+    placed_queue: asyncio.Queue[tuple[str, Order]],
 ) -> None:
     while True:
-        order = await placed_queue.get()
-        await nc.publish(f"orders.placed.{order.symbol}", codec.encode_order(order))
-        log.info("placed order: %s %s %s", order.side, order.quantity, order.symbol)
+        exchange, order = await placed_queue.get()
+        await nc.publish(
+            f"orders.placed.{exchange}.{order.symbol}", codec.encode_order(order)
+        )
+        log.info(
+            "placed order: %s %s %s @ %s",
+            order.side,
+            order.quantity,
+            order.symbol,
+            exchange,
+        )
+
+
+async def _publish_broker_pnl(
+    nc: nats.aio.client.Client,
+    brokers: dict[str, BaseBroker],
+    interval: float = 5.0,
+) -> None:
+    """Publish a PnL snapshot for every broker that exposes pnl properties."""
+    while True:
+        await asyncio.sleep(interval)
+        ts = datetime.now(UTC).isoformat()
+        total_realized = Decimal(0)
+        total_unrealized = Decimal(0)
+        for exchange, broker in brokers.items():
+            if not (
+                hasattr(broker, "total_realized_pnl")
+                and hasattr(broker, "total_unrealized_pnl")
+            ):
+                continue
+            realized = broker.total_realized_pnl
+            unrealized = broker.total_unrealized_pnl
+            total_realized += realized
+            total_unrealized += unrealized
+            payload: dict[str, Any] = {
+                "exchange": exchange,
+                "total_realized": str(realized),
+                "total_unrealized": str(unrealized),
+                "total": str(realized + unrealized),
+                "timestamp": ts,
+            }
+            # Fetch live wallet balance (AUM) for brokers that support it
+            if hasattr(broker, "wallet_balance"):
+                wb = await broker.wallet_balance()
+                if wb:
+                    payload["total_equity"] = wb.get("totalEquity", "")
+                    payload["total_wallet_balance"] = wb.get("totalWalletBalance", "")
+                    payload["available_balance"] = wb.get("totalAvailableBalance", "")
+            # Per-exchange subject so the dashboard can show each broker separately
+            await nc.publish(
+                f"broker.pnl.{exchange}",
+                json.dumps(payload).encode(),
+            )
+        # Aggregate across all brokers on the plain broker.pnl subject
+        await nc.publish(
+            "broker.pnl",
+            json.dumps(
+                {
+                    "exchange": "all",
+                    "total_realized": str(total_realized),
+                    "total_unrealized": str(total_unrealized),
+                    "total": str(total_realized + total_unrealized),
+                    "timestamp": ts,
+                }
+            ).encode(),
+        )
 
 
 async def _publish_positions(
     nc: nats.aio.client.Client,
     consolidator: OrderConsolidator,
-    broker: BaseBroker,
     interval: float = 5.0,
 ) -> None:
-    """Periodically query the broker for all tracked positions and broadcast."""
+    """Query every broker for its tracked symbols and publish a unified snapshot."""
     while True:
         await asyncio.sleep(interval)
-        symbols = consolidator.tracked_symbols
-        if not symbols:
-            continue
-        snapshot: list[dict] = []
-        for symbol in symbols:
-            pos = await broker.position(symbol)
-            if pos is not None:
-                snapshot.append(
-                    {
-                        "symbol": pos.symbol,
-                        "quantity": str(pos.quantity),
-                        "avg_entry_price": str(pos.avg_entry_price),
-                        "unrealized_pnl": str(pos.unrealized_pnl),
-                        "realized_pnl": str(pos.realized_pnl),
-                    }
-                )
+        snapshot: list[dict[str, Any]] = []
+        for exchange, broker in consolidator.brokers.items():
+            symbols = consolidator.tracked_symbols_for(exchange)
+            for symbol in symbols:
+                pos = await broker.position(symbol)
+                if pos is not None:
+                    snapshot.append(
+                        {
+                            "symbol": pos.symbol,
+                            "exchange": exchange,
+                            "quantity": str(pos.quantity),
+                            "avg_entry_price": str(pos.avg_entry_price),
+                            "unrealized_pnl": str(pos.unrealized_pnl),
+                            "realized_pnl": str(pos.realized_pnl),
+                        }
+                    )
         payload = json.dumps(snapshot).encode()
         await nc.publish("positions.snapshot", payload)
-        log.debug("published positions snapshot: %d symbols", len(snapshot))
+        log.debug("published positions snapshot: %d positions", len(snapshot))
 
 
 async def _publish_fills(
@@ -217,20 +232,51 @@ async def _publish_fills(
         )
 
 
+async def _feed_market_prices(
+    nc: nats.aio.client.Client,
+    brokers: dict[str, BaseBroker],
+) -> None:
+    """Push bar/funding prices to every broker that accepts update_market_price()."""
+
+    def _update_all(symbol: str, price: Decimal) -> None:
+        for broker in brokers.values():
+            if hasattr(broker, "update_market_price"):
+                broker.update_market_price(symbol, price)
+
+    async def _on_bar(msg: nats.aio.msg.Msg) -> None:
+        try:
+            event = codec.decode(msg.data)
+            _update_all(event.symbol, event.close)  # type: ignore[union-attr]
+        except Exception as exc:
+            log.debug("_on_bar decode error: %s", exc)
+
+    async def _on_funding(msg: nats.aio.msg.Msg) -> None:
+        try:
+            event = codec.decode(msg.data)
+            _update_all(event.symbol, event.mark_price)  # type: ignore[union-attr]
+        except Exception as exc:
+            log.debug("_on_funding decode error: %s", exc)
+
+    await nc.subscribe("futures.*.bars.*", cb=_on_bar)
+    await nc.subscribe("futures.*.funding_rate", cb=_on_funding)
+    await asyncio.get_running_loop().create_future()
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    broker = _make_broker()
+    brokers = _build_brokers()
     target_queue: asyncio.Queue[TargetPosition] = asyncio.Queue()
-    placed_queue: asyncio.Queue[Order] = asyncio.Queue()
+    placed_queue: asyncio.Queue[tuple[str, Order]] = asyncio.Queue()
     fills_queue: asyncio.Queue[FillConfirmation] = asyncio.Queue()
 
     consolidator = OrderConsolidator(
         target_queue=target_queue,
-        broker=broker,
+        brokers=brokers,
+        default_exchange=_DEFAULT_EXCHANGE,
         min_order_size=Decimal("0.001"),
         placed_queue=placed_queue,
         fills_queue=fills_queue,
@@ -244,9 +290,12 @@ async def main() -> None:
             tg.create_task(consolidator.run())
             tg.create_task(_publish_placed_orders(nc, placed_queue))
             tg.create_task(_publish_fills(nc, fills_queue))
-            tg.create_task(_publish_positions(nc, consolidator, broker))
+            tg.create_task(_publish_positions(nc, consolidator))
+            tg.create_task(_publish_broker_pnl(nc, brokers))
+            tg.create_task(_feed_market_prices(nc, brokers))
     finally:
-        await broker.aclose()
+        for broker in brokers.values():
+            await broker.aclose()
         await nc.drain()
 
 

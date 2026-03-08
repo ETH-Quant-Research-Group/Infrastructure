@@ -85,8 +85,8 @@ class FundingArbStrategy(BaseStrategy):
         entry_threshold_annualized: Decimal = Decimal("0.005"),
         exit_threshold_annualized: Decimal = Decimal("0.00"),
         min_consecutive_positive: int = 2,
-        min_hold_periods: int = 2,  # FAST MODE: 2 bars/minutes.(= 8 days)
-        max_hold_periods: int = 10,  # FAST MODE: 10 bars/minutes.(= 14 days)
+        min_hold_periods: int = 10,  # FAST MODE: 10 bars/minutes.(= 8 days)
+        max_hold_periods: int = 30,  # FAST MODE: 30 bars/minutes.(= 14 days)
         max_volatility: Decimal = Decimal("1.00"),
     ) -> None:
         self.symbol = symbol
@@ -244,7 +244,9 @@ class FundingArbStrategy(BaseStrategy):
             notional,
             self._equity,
         )
-        return TargetPosition(symbol=self.symbol, quantity=-coins)
+        return TargetPosition(
+            symbol=self.symbol, quantity=-coins, exchange="bybit_demo"
+        )
 
     def _check_hold_exit(
         self, rate: FundingRate, ann_rate: Decimal
@@ -289,7 +291,9 @@ class FundingArbStrategy(BaseStrategy):
         self._position_coins = Decimal("0")
         self._holding_periods = 0
         self._last_boundary = None
-        return TargetPosition(symbol=self.symbol, quantity=close_qty)
+        return TargetPosition(
+            symbol=self.symbol, quantity=close_qty, exchange="bybit_demo"
+        )
 
     # ------------------------------------------------------------------
     # Helpers

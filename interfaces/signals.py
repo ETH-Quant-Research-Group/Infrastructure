@@ -26,3 +26,4 @@ class TargetPosition:
     quantity: Decimal
     price: Decimal = Decimal(0)
     strategy_id: str = ""
+    exchange: str = ""  # empty string → consolidator uses its default exchange

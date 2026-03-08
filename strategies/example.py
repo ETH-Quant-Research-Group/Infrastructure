@@ -38,7 +38,7 @@ class ExampleStrategy(BaseStrategy):
             bar.close,
             qty,
         )
-        return TargetPosition(symbol="BTCUSDT", quantity=qty)
+        return TargetPosition(symbol="BTCUSDT", quantity=qty, exchange="bybit_demo")
 
     def on_funding_rate(self, rate: FundingRate) -> TargetPosition | None:
         log.info(

@@ -91,6 +91,7 @@ def encode_target(target: TargetPosition) -> bytes:
             "quantity": str(target.quantity),
             "price": str(target.price),
             "strategy_id": target.strategy_id,
+            "exchange": target.exchange,
         }
     ).encode()
 
@@ -103,6 +104,7 @@ def decode_target(data: bytes) -> TargetPosition:
         quantity=Decimal(d["quantity"]),
         price=Decimal(d.get("price", "0")),
         strategy_id=d["strategy_id"],
+        exchange=d.get("exchange", ""),
     )
 
 

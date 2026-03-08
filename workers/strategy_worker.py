@@ -86,6 +86,18 @@ async def _listen_fills(
     await asyncio.get_running_loop().create_future()
 
 
+async def _publish_heartbeat_periodically(
+    nc: nats.aio.client.Client,
+    strategy_id: str,
+    interval: float = 8.0,
+) -> None:
+    """Publish a heartbeat so the dashboard can show the strategy as active."""
+    payload = json.dumps({"strategy_id": strategy_id, "status": "active"}).encode()
+    while True:
+        await asyncio.sleep(interval)
+        await nc.publish(f"strategy.heartbeat.{strategy_id}", payload)
+
+
 async def _publish_registration_periodically(
     nc: nats.aio.client.Client,
     strategy_cls: type[BaseStrategy],
@@ -180,6 +192,7 @@ async def main() -> None:
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
             tg.create_task(_publish_pnl_periodically(nc, strategy_id, runner))
+            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id))
             tg.create_task(_publish_registration_periodically(nc, strategy_cls))
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")
