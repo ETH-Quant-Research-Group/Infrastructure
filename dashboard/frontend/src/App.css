@@ -1,0 +1,23 @@
+/* \* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #0f0f0f;
+  color: #d1d4dc;
+  font-size: 13px;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: 0.01em;
+} */
+
+/* .font-mono,
+code,
+[class*="font-mono"] {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+} */
