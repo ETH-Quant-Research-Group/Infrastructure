@@ -84,9 +84,11 @@ class PnLCalc:
             pos.open_qty = new_qty
             if new_qty == Decimal(0):
                 pos.avg_entry_price = Decimal(0)
+                pos.last_unrealized = Decimal(0)  # PNL fix!!!
             elif (old_qty > 0) != (new_qty > 0):
                 # Position flipped direction — new entry is at fill price
                 pos.avg_entry_price = fill_price
+                pos.last_unrealized = Decimal(0)  # PNL fix!!!
             # Partially closed: avg_entry_price unchanged
 
         self._record_snapshot(symbol, pos, pos.last_unrealized)

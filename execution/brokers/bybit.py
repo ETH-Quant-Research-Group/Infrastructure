@@ -67,9 +67,10 @@ class BybitBroker(BaseBroker):
         self._api_key = api_key or os.environ["BYBIT_API_KEY"]
         self._api_secret = api_secret or os.environ["BYBIT_API_SECRET"]
         self._base_url = _DEMO_URL if demo else _LIVE_URL
-        # PnL cache — updated on each position() or _refresh_positions() call
-        self._realized_pnl_cache: Decimal = Decimal(0)
-        self._unrealized_pnl_cache: Decimal = Decimal(0)
+        # PnL cache — updated on each position() call, keyed by symbol so that
+        # querying multiple symbols does not overwrite each other.
+        self._realized_pnl_cache: dict[str, Decimal] = {}  # PNL fix!!!
+        self._unrealized_pnl_cache: dict[str, Decimal] = {}  # PNL fix!!!
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=httpx.Timeout(10.0),
@@ -244,9 +245,9 @@ class BybitBroker(BaseBroker):
             avg_entry = Decimal(item.get("avgPrice", "0"))
             liq_price = item.get("liqPrice")
 
-            # Update PnL cache
-            self._realized_pnl_cache = realized
-            self._unrealized_pnl_cache = unrealized
+            # Update PnL cache per symbol so multi-symbol totals are correct
+            self._realized_pnl_cache[symbol] = realized  # PNL fix!!!
+            self._unrealized_pnl_cache[symbol] = unrealized  # PNL fix!!!
 
             return PerpPosition(
                 symbol=symbol,
@@ -286,13 +287,13 @@ class BybitBroker(BaseBroker):
 
     @property
     def total_realized_pnl(self) -> Decimal:
-        """Last cached realized PnL across all positions queried via position()."""
-        return self._realized_pnl_cache
+        """Sum of cached realized PnL across all symbols queried via position()."""
+        return sum(self._realized_pnl_cache.values(), Decimal(0))  # PNL fix!!!
 
     @property
     def total_unrealized_pnl(self) -> Decimal:
-        """Last cached unrealized PnL across all positions queried via position()."""
-        return self._unrealized_pnl_cache
+        """Sum of cached unrealized PnL across all symbols queried via position()."""
+        return sum(self._unrealized_pnl_cache.values(), Decimal(0))  # PNL fix!!!
 
     # ------------------------------------------------------------------ lifecycle
 
