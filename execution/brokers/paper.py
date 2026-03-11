@@ -107,9 +107,17 @@ class PaperBroker(BaseBroker):
 
         pos = self._positions.setdefault(order.symbol, _PaperPosition())
 
-        # Fill price: use limit price if set, else current market price, else avg_entry
+        # Fill price: use limit price if set, else current market price.
+        # Refuse market orders with no known price — filling at 0 would
+        # permanently corrupt avg_entry for the position.
         if order.order_type is OrderType.MARKET:
-            fill_price = pos.market_price if pos.market_price else order.price
+            if not pos.market_price:  # PNL fix!!!
+                return OrderResult(
+                    order_id=None,
+                    order=order,
+                    error="no market price known for market order — deliver a bar first",  # PNL fix!!!
+                )
+            fill_price = pos.market_price  # PNL fix!!!
         else:
             fill_price = order.price
 

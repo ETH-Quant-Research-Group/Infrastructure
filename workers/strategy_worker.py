@@ -120,11 +120,18 @@ async def _publish_pnl_periodically(
     nc: nats.aio.client.Client,
     strategy_id: str,
     runner: StrategyRunner,
+    guard: StrategyGuard,  # PNL fix!!!
     interval: float = 5.0,
 ) -> None:
-    """Publish unrealized PnL updates on a fixed interval."""
+    """Publish unrealized PnL updates on a fixed interval and keep guard current."""
+    from decimal import Decimal
+
+    last_total: Decimal = Decimal(0)  # PNL fix!!!
     while True:
         await asyncio.sleep(interval)
+        current_total = runner.pnl_calc.total
+        guard.record_pnl(current_total - last_total)  # PNL fix!!!
+        last_total = current_total  # PNL fix!!!
         await nc.publish(
             f"pnl.{strategy_id}",
             codec.encode_pnl_snapshot(
@@ -191,7 +198,7 @@ async def main() -> None:
             tg.create_task(runner.run())
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
-            tg.create_task(_publish_pnl_periodically(nc, strategy_id, runner))
+            tg.create_task(_publish_pnl_periodically(nc, strategy_id, runner, guard))  # PNL fix!!!
             tg.create_task(_publish_heartbeat_periodically(nc, strategy_id))
             tg.create_task(_publish_registration_periodically(nc, strategy_cls))
     finally:
