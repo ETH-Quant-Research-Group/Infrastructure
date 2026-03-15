@@ -26,18 +26,18 @@ function Home() {
 
   return (
     <div className="flex flex-col gap-8">
-      <div className="flex gap-6 h-full ">
-        <div className="flex-1 min-w-0 border-2pt-1 border-white">
+      <div className="flex flex-col lg:flex-row gap-6 h-full">
+        <div className="flex-1 min-w-0">
           <Performance />
         </div>
-        <div className="w-72 shrink-0 border-l  border-zinc-900 pl-6  border-2">
+        <div className="w-full lg:w-72 lg:shrink-0 border-t lg:border-t-0 lg:border-l border-zinc-900 pt-6 lg:pt-0 lg:pl-6">
           <Orders />
         </div>
       </div>
 
       {strategyIds.length > 0 && (
         <div className="flex flex-col gap-6">
-          <h2 className="text-white font-bold font-notion-inter text-[32px] leading-[1.1]">Strategy Performance</h2>
+          <h2 className="text-white font-bold font-notion-inter text-2xl md:text-[32px] leading-[1.1]">Strategy Performance</h2>
           <div className="grid grid-cols-1 gap-6">
             {strategyIds.map(sid => (
               <div key={sid} className="bg-[#0a0a0a] border border-zinc-900 rounded-xl p-5">
@@ -235,9 +235,9 @@ function PositionDetail({ position: detail }) {
   ]
 
   return (
-    <div className={`rounded-xl border border-zinc-900 bg-[#0a0a0a] p-6 flex gap-6 ${detail.status === 'closed' ? 'opacity-50' : ''}`}>
+    <div className={`rounded-xl border border-zinc-900 bg-[#0a0a0a] p-4 md:p-6 flex flex-col md:flex-row gap-4 md:gap-6 ${detail.status === 'closed' ? 'opacity-50' : ''}`}>
       {/* Left: info */}
-      <div className="flex flex-col gap-5 w-72 shrink-0">
+      <div className="flex flex-col gap-5 w-full md:w-72 md:shrink-0">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <h3 className="text-white text-2xl font-bold">{detail.symbol}</h3>
@@ -336,6 +336,7 @@ function Assets() {
       {/* Sticky header: tabs + position cards */}
       <div className="sticky top-0 z-10 bg-[#0f0f0f] pb-3 flex flex-col gap-4">
         {/* Asset class tabs */}
+        <div className="overflow-x-auto -mx-4 md:mx-0 px-4 md:px-0">
         <div className="flex items-center gap-1 bg-[#111] border border-zinc-800 rounded-full px-1.5 py-1.5 w-fit">
           {ASSET_CLASSES.map(ac => (
             <button
@@ -350,6 +351,7 @@ function Assets() {
             </button>
           ))}
           {error && <span className="ml-3 text-red-500 text-xs">{error}</span>}
+        </div>
         </div>
 
         {/* Horizontal position cards */}
@@ -414,14 +416,14 @@ function App() {
 
   return (
     <div className='flex flex-col min-h-screen'>
-      <header className="flex items-center gap-8 px-8 h-14 bg-black border-b border-zinc-900">
-        <img src={logo} alt="logo" className="h-8 w-auto object-contain" />
-        <nav className="flex gap-1">
+      <header className="flex items-center gap-3 md:gap-8 px-4 md:px-8 h-14 bg-black border-b border-zinc-900">
+        <img src={logo} alt="logo" className="h-8 w-auto object-contain shrink-0" />
+        <nav className="flex gap-1 overflow-x-auto">
           {TABS.map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-3.5 py-1.5 rounded-md text-[0.85rem] cursor-pointer transition-colors duration-150 border-0 ${activeTab === tab
+              className={`px-3 md:px-3.5 py-1.5 rounded-md text-[0.85rem] cursor-pointer transition-colors duration-150 border-0 whitespace-nowrap ${activeTab === tab
                 ? 'bg-zinc-800 text-white'
                 : 'bg-transparent text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
                 }`}
@@ -431,7 +433,7 @@ function App() {
           ))}
         </nav>
       </header>
-      <main className="p-8 flex-1">
+      <main className="p-4 md:p-8 flex-1">
         {TABS.map(tab => {
           const Page = PAGES[tab]
           return (

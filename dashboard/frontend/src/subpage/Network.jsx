@@ -13,15 +13,13 @@ function patternToRegex(pattern) {
   return new RegExp(`^${escaped}$`)
 }
 
-// ─── SVG fan connector ────────────────────────────────────────────────────────
+// ─── SVG fan connector (desktop only) ────────────────────────────────────────
 
 function bezier(p0, p1, p2, p3, t) {
   const u = 1 - t
   return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3
 }
 
-// fanIn=false → one source (left-center) fans out to many targets (right, one per node)
-// fanIn=true  → many sources (left, one per node) converge to one target (right-center)
 function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
   const W = 200
   const n = heights.length
@@ -55,8 +53,6 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
         const color  = active ? '#34d399' : '#3d5268'
         const mid    = active ? fwdAId : fwdId
 
-        // fan-out: single source left-center → spread targets on right
-        // fan-in:  spread sources on left → single target right-center
         const srcX = fanIn ? 4      : 4
         const srcY = fanIn ? cy     : totalH / 2
         const tgtX = fanIn ? W - 4  : W - 4
@@ -129,7 +125,7 @@ function Badge({ label, active }) {
 
 function FeedServerNode({ publishedSubjects, isActive }) {
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-56">
+    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-full md:w-56">
       <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">Feed Server</div>
       <div className="text-[0.72rem] text-zinc-500 mb-1">Publishing:</div>
       <div className="flex flex-col gap-1 mb-3">
@@ -148,42 +144,10 @@ function FeedServerNode({ publishedSubjects, isActive }) {
   )
 }
 
-function StrategyNode({ strategy, isActive }, ref) {
-  const guardActive = isActive(`strategy.heartbeat.${strategy.name}`, GUARD_TTL)
-  return (
-    <div ref={ref} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-72">
-      <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-1">
-        StrategyRunner
-      </div>
-      <div className="text-sm font-semibold text-white mb-3">{strategy.name}</div>
-
-      {/* Guard */}
-      <div className="border border-zinc-700 rounded p-2 mb-3 bg-zinc-950">
-        <div className="text-[0.65rem] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">StrategyGuard</div>
-        <div className="text-[0.72rem] text-zinc-400 mb-1.5">
-          max_loss <span className="text-white font-mono">${strategy.max_loss}</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className={`inline-block w-1.5 h-1.5 rounded-full ${guardActive ? 'bg-emerald-400' : 'bg-red-500'}`} />
-          <span className={`text-[0.72rem] font-medium ${guardActive ? 'text-emerald-400' : 'text-red-400'}`}>
-            {guardActive ? 'ACTIVE' : 'HALTED'}
-          </span>
-        </div>
-      </div>
-
-      <div className="text-[0.72rem] text-zinc-500 mb-1">Subscribed data:</div>
-      <div className="flex flex-col gap-1">
-        {(strategy.topics ?? []).map(t => (
-          <Badge key={t} label={t} active={isActive(t)} />
-        ))}
-      </div>
-    </div>
-  )
-}
 const StrategyNodeRef = ({ strategy, isActive, nodeRef }) => {
   const guardActive = isActive(`strategy.heartbeat.${strategy.name}`, GUARD_TTL)
   return (
-    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-72">
+    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-full md:w-72">
       <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-1">StrategyRunner</div>
       <div className="text-sm font-semibold text-white mb-3">{strategy.name}</div>
       <div className="border border-zinc-700 rounded p-2 mb-3 bg-zinc-950">
@@ -212,7 +176,7 @@ function ConsolidatorNode({ topology, isActive }) {
   const subscribes = topology?.consolidator?.subscribes ?? []
   const publishes  = topology?.consolidator?.publishes  ?? []
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-56">
+    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-full md:w-56">
       <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">Consolidator</div>
       <div className="text-[0.72rem] text-zinc-500 mb-1">Subscribes:</div>
       <div className="flex flex-col gap-1 mb-3">
@@ -233,7 +197,7 @@ function BrokerNode({ broker, recentOrders, nodeRef }) {
   }
   const total = parseFloat(broker?.total ?? 0)
   return (
-    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-52">
+    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-full md:w-52">
       <div className="flex items-center gap-2 mb-3">
         <span className={`w-2 h-2 rounded-full shrink-0 ${broker?.active ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
         <div className="text-xs font-semibold text-zinc-300 uppercase tracking-wider truncate">
@@ -278,18 +242,18 @@ function BrokerNode({ broker, recentOrders, nodeRef }) {
 
 function EmptyStrategies() {
   return (
-    <div className="bg-zinc-900 border border-dashed border-zinc-700 rounded-lg p-6 w-72 text-center self-center">
+    <div className="bg-zinc-900 border border-dashed border-zinc-700 rounded-lg p-6 w-full md:w-72 text-center self-center">
       <div className="text-zinc-600 text-sm">No strategies running</div>
       <div className="text-zinc-700 text-xs mt-1">Start a strategy worker to see it here</div>
     </div>
   )
 }
 
-// ─── Simple horizontal single arrow (for 0 or 1 strategy) ────────────────────
+// ─── Horizontal single arrow (desktop) ───────────────────────────────────────
 
 function SingleArrow({ subjects, isActive }) {
   return (
-    <div className="flex flex-col items-center justify-center self-center gap-1.5 px-4 shrink-0">
+    <div className="hidden md:flex flex-col items-center justify-center self-center gap-1.5 px-4 shrink-0">
       <div className="flex items-center gap-1">
         <div className="w-6 h-px bg-zinc-700" />
         <span className="text-zinc-600 text-sm">→</span>
@@ -299,6 +263,30 @@ function SingleArrow({ subjects, isActive }) {
           <Badge key={s} label={s} active={isActive(s)} />
         ))}
       </div>
+    </div>
+  )
+}
+
+// ─── Vertical arrow connector (mobile only) ───────────────────────────────────
+
+function VerticalArrow({ subjects, isActive }) {
+  return (
+    <div className="flex md:hidden flex-col items-center py-1">
+      <div className="w-px h-4 bg-zinc-700" />
+      {subjects.length > 0 && (
+        <div className="flex flex-wrap justify-center gap-1 py-1.5">
+          {subjects.slice(0, 3).map(s => (
+            <Badge key={s} label={s} active={isActive(s)} />
+          ))}
+          {subjects.length > 3 && (
+            <Badge label={`+${subjects.length - 3} more`} active={false} />
+          )}
+        </div>
+      )}
+      <div className="w-px h-4 bg-zinc-700" />
+      <svg width="10" height="6" viewBox="0 0 10 6">
+        <polygon points="0,0 10,0 5,6" fill="#3d5268" />
+      </svg>
     </div>
   )
 }
@@ -330,7 +318,6 @@ export default function Network() {
     return () => clearInterval(id)
   }, [])
 
-  // Measure strategy node heights after render, only update if values changed
   useLayoutEffect(() => {
     const next = nodeRefs.current.filter(Boolean).map(el => el.getBoundingClientRect().height)
     if (next.length === 0) return
@@ -339,7 +326,6 @@ export default function Network() {
     )
   })
 
-  // Measure broker node heights
   useLayoutEffect(() => {
     const next = brokerRefs.current.filter(Boolean).map(el => el.getBoundingClientRect().height)
     if (next.length === 0) return
@@ -358,7 +344,8 @@ export default function Network() {
     function connect() {
       if (stopped) return
       setWsStatus('connecting')
-      ws = new WebSocket(`ws://${window.location.host}/ws/live`)
+      const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      ws = new WebSocket(`${wsProto}://${window.location.host}/ws/live`)
       ws.onopen  = () => setWsStatus('connected')
       ws.onclose = () => { setWsStatus('disconnected'); if (!stopped) setTimeout(connect, 2000) }
       ws.onerror = () => setWsStatus('disconnected')
@@ -396,8 +383,6 @@ export default function Network() {
   const n  = strategies.length
   const nb = brokers.length
 
-  // All topics any strategy subscribes to — the feed server must be publishing these.
-  // Fall back to live traffic if topology hasn't loaded yet.
   const publishedSubjects = strategies.length > 0
     ? [...new Set(strategies.flatMap(s => s.topics ?? []))].sort()
     : [...new Set(
@@ -406,7 +391,6 @@ export default function Network() {
           .map(([s]) => s)
       )].sort()
 
-  // Heights to use: measured or estimated (160px per node)
   const heights = nodeHeights.length === n && n > 0
     ? nodeHeights
     : strategies.map(() => 160)
@@ -429,30 +413,24 @@ export default function Network() {
         </span>
       </div>
 
-      {/* Main diagram */}
-      <div className="flex items-center overflow-x-auto">
+      {/* Main diagram — horizontal on desktop, vertical on mobile */}
+      <div className="flex flex-col md:flex-row md:items-center md:overflow-x-auto">
 
         {/* Feed server */}
         <FeedServerNode publishedSubjects={publishedSubjects} isActive={isActive} />
 
-        {/* Feed → strategies fan */}
+        {/* Feed → strategies */}
+        <VerticalArrow subjects={strategies[0]?.topics ?? publishedSubjects} isActive={isActive} />
         {n > 1 ? (
-          <FanSvg
-            heights={heights}
-            getTopics={i => strategies[i]?.topics ?? []}
-            fanIn={false}
-            isActive={isActive}
-            uid="feed-strat"
-          />
+          <div className="hidden md:block">
+            <FanSvg heights={heights} getTopics={i => strategies[i]?.topics ?? []} fanIn={false} isActive={isActive} uid="feed-strat" />
+          </div>
         ) : (
-          <SingleArrow
-            subjects={strategies[0]?.topics ?? publishedSubjects}
-            isActive={isActive}
-          />
+          <SingleArrow subjects={strategies[0]?.topics ?? publishedSubjects} isActive={isActive} />
         )}
 
-        {/* Strategy nodes column */}
-        <div className="flex flex-col shrink-0" style={{ gap: NODE_GAP }}>
+        {/* Strategy nodes */}
+        <div className="flex flex-col w-full md:w-auto md:shrink-0" style={{ gap: NODE_GAP }}>
           {n > 0
             ? strategies.map((s, i) => (
                 <StrategyNodeRef
@@ -466,40 +444,31 @@ export default function Network() {
           }
         </div>
 
-        {/* Strategies → consolidator fan */}
+        {/* Strategies → consolidator */}
+        <VerticalArrow subjects={['signals.targets.*']} isActive={isActive} />
         {n > 1 ? (
-          <FanSvg
-            heights={heights}
-            getTopics={i => [`signals.targets.${strategies[i]?.name}`]}
-            fanIn={true}
-            isActive={isActive}
-            uid="strat-cons"
-          />
+          <div className="hidden md:block">
+            <FanSvg heights={heights} getTopics={i => [`signals.targets.${strategies[i]?.name}`]} fanIn={true} isActive={isActive} uid="strat-cons" />
+          </div>
         ) : (
-          <SingleArrow
-            subjects={['signals.targets.*']}
-            isActive={isActive}
-          />
+          <SingleArrow subjects={['signals.targets.*']} isActive={isActive} />
         )}
 
         {/* Consolidator */}
         <ConsolidatorNode topology={topology} isActive={isActive} />
 
-        {/* Consolidator → broker(s) */}
+        {/* Consolidator → brokers */}
+        <VerticalArrow subjects={['orders.placed.*']} isActive={isActive} />
         {nb > 1 ? (
-          <FanSvg
-            heights={bHeights}
-            getTopics={() => ['orders.placed.*']}
-            fanIn={false}
-            isActive={isActive}
-            uid="cons-broker"
-          />
+          <div className="hidden md:block">
+            <FanSvg heights={bHeights} getTopics={() => ['orders.placed.*']} fanIn={false} isActive={isActive} uid="cons-broker" />
+          </div>
         ) : (
           <SingleArrow subjects={['orders.placed.*']} isActive={isActive} />
         )}
 
-        {/* Broker column */}
-        <div className="flex flex-col shrink-0" style={{ gap: NODE_GAP }}>
+        {/* Broker nodes */}
+        <div className="flex flex-col w-full md:w-auto md:shrink-0" style={{ gap: NODE_GAP }}>
           {nb > 0
             ? brokers.map((b, i) => (
                 <BrokerNode
