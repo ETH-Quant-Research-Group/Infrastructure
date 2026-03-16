@@ -1,5 +1,5 @@
 tunnel: my-dashboard
-credentials-file: /Users/carloteufel/.cloudflared/89279296-baf5-4a40-b2f2-62373d950574.json
+credentials-file: /home/carloteufel/.cloudflared/89279296-baf5-4a40-b2f2-62373d950574.json
 
 ingress:
   - hostname: qrfzurich.com
