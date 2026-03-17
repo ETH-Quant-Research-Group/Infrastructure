@@ -9,6 +9,10 @@
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
   }
+  html.light, html.light body {
+    background: #f9fafb;
+    color: #111827;
+  }
 }
 
 .font-notion-inter {
