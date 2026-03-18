@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useTheme, th } from '../theme'
 
 const ACTIVITY_TTL = 800
 const FEED_TTL = 60000
 const GUARD_TTL = 30000
-const NODE_GAP = 16
+const NODE_GAP = 20
 
 function patternToRegex(pattern) {
   const escaped = pattern
@@ -20,7 +21,7 @@ function bezier(p0, p1, p2, p3, t) {
   return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3
 }
 
-function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
+function FanSvg({ heights, getTopics, fanIn = false, isActive, uid, colors }) {
   const W = 200
   const n = heights.length
   if (n === 0) return <div style={{ width: W }} />
@@ -33,33 +34,33 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
   })
   const totalH = y
 
-  const fwdId  = `${uid}-fwd`
+  const fwdId = `${uid}-fwd`
   const fwdAId = `${uid}-fwd-a`
 
   return (
     <svg width={W} height={totalH} className="shrink-0 overflow-visible max-md:hidden" style={{ alignSelf: 'center' }}>
       <defs>
         <marker id={fwdId} markerWidth="6" markerHeight="5" refX="5" refY="2.5" orient="auto">
-          <polygon points="0 0,6 2.5,0 5" fill="#3d5268" />
+          <polygon points="0 0,6 2.5,0 5" fill={colors.svgInactive} />
         </marker>
         <marker id={fwdAId} markerWidth="6" markerHeight="5" refX="5" refY="2.5" orient="auto">
-          <polygon points="0 0,6 2.5,0 5" fill="#34d399" />
+          <polygon points="0 0,6 2.5,0 5" fill={colors.svgActive} />
         </marker>
       </defs>
 
       {centers.map((cy, i) => {
         const topics = getTopics(i)
         const active = topics.some(t => isActive(t))
-        const color  = active ? '#34d399' : '#3d5268'
-        const mid    = active ? fwdAId : fwdId
+        const color = active ? colors.svgActive : colors.svgInactive
+        const mid = active ? fwdAId : fwdId
 
-        const srcX = fanIn ? 4      : 4
-        const srcY = fanIn ? cy     : totalH / 2
-        const tgtX = fanIn ? W - 4  : W - 4
+        const srcX = fanIn ? 4 : 4
+        const srcY = fanIn ? cy : totalH / 2
+        const tgtX = fanIn ? W - 4 : W - 4
         const tgtY = fanIn ? totalH / 2 : cy
 
         const cpx = (srcX + tgtX) / 2
-        const d   = `M ${srcX} ${srcY} C ${cpx} ${srcY},${cpx} ${tgtY},${tgtX} ${tgtY}`
+        const d = `M ${srcX} ${srcY} C ${cpx} ${srcY},${cpx} ${tgtY},${tgtX} ${tgtY}`
 
         const lx = bezier(srcX, cpx, cpx, tgtX, 0.5)
         const ly = bezier(srcY, srcY, tgtY, tgtY, 0.5)
@@ -69,7 +70,7 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
         )
         const extra = topics.length > 2 ? `+${topics.length - 2} more` : null
         const allLines = extra ? [...lines, extra] : lines
-        const boxW = Math.max(...allLines.map(l => l.length)) * 5.4
+        const boxW = Math.max(...allLines.map(l => l.length)) * 5.2
         const boxH = allLines.length * 11 + 4
 
         return (
@@ -83,8 +84,8 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
                   width={boxW + 6}
                   height={boxH}
                   rx="3"
-                  fill="#0d0d0d"
-                  stroke={active ? '#1a3a2a' : '#1a222c'}
+                  fill={colors.svgLabelBg}
+                  stroke={active ? colors.svgLabelBorderA : colors.svgLabelBorderI}
                   strokeWidth="1"
                 />
                 {allLines.map((line, j) => (
@@ -93,8 +94,8 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
                     x={lx}
                     y={ly - boxH / 2 + 10 + j * 11}
                     textAnchor="middle"
-                    fontSize="8"
-                    fill={active ? '#34d399' : '#4a6070'}
+                    fontSize="9"
+                    fill={active ? colors.svgLabelTextA : colors.svgLabelTextI}
                     fontFamily="monospace"
                   >
                     {line}
@@ -112,29 +113,32 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid }) {
 // ─── Node cards ───────────────────────────────────────────────────────────────
 
 function Badge({ label, active }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   return (
-    <span className={`rounded px-2 py-0.5 text-[0.72rem] font-mono whitespace-nowrap transition-all duration-300 ${
-      active
-        ? 'bg-emerald-900/60 text-emerald-300 ring-1 ring-emerald-500'
-        : 'bg-zinc-800 text-zinc-500'
-    }`}>
+    <span
+      title={label}
+      className={`rounded px-2 py-0.5 text-xs font-mono whitespace-nowrap block transition-colors duration-75 ${active ? c.badgeA : c.badgeI}`}
+    >
       {label}
     </span>
   )
 }
 
 function FeedServerNode({ publishedSubjects, isActive }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-56 max-md:w-full">
-      <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">Feed Server</div>
-      <div className="text-[0.72rem] text-zinc-500 mb-1">Publishing:</div>
-      <div className="flex flex-col gap-1 mb-3">
+    <div className={`${c.nodeBg} border ${c.b3} rounded-lg p-3 shrink-0`}>
+      <div className={`text-xs font-semibold ${c.t2} uppercase tracking-wider mb-2`}>Feed Server</div>
+      <div className={`text-xs ${c.t3} mb-1`}>Publishing:</div>
+      <div className="flex flex-col gap-1 mb-2">
         {publishedSubjects.length > 0
           ? publishedSubjects.map(s => <Badge key={s} label={s} active={isActive(s, FEED_TTL)} />)
-          : <span className="text-[0.72rem] text-zinc-700 italic">idle</span>
+          : <span className={`text-xs ${c.t5} italic`}>idle</span>
         }
       </div>
-      <div className="text-[0.72rem] text-zinc-500 mb-1">Listens:</div>
+      <div className={`text-xs ${c.t3} mb-1`}>Listens:</div>
       <div className="flex flex-col gap-1">
         {['control.subscribe.>', 'control.unsubscribe.>'].map(s => (
           <Badge key={s} label={s} active={isActive(s)} />
@@ -145,24 +149,26 @@ function FeedServerNode({ publishedSubjects, isActive }) {
 }
 
 const StrategyNodeRef = ({ strategy, isActive, nodeRef }) => {
+  const isDark = useTheme()
+  const c = th(isDark)
   const guardActive = isActive(`strategy.heartbeat.${strategy.name}`, GUARD_TTL)
   return (
-    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-72 max-md:w-full">
-      <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-1">StrategyRunner</div>
-      <div className="text-sm font-semibold text-white mb-3">{strategy.name}</div>
-      <div className="border border-zinc-700 rounded p-2 mb-3 bg-zinc-950">
-        <div className="text-[0.65rem] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">StrategyGuard</div>
-        <div className="text-[0.72rem] text-zinc-400 mb-1.5">
-          max_loss <span className="text-white font-mono">${strategy.max_loss}</span>
+    <div ref={nodeRef} className={`${c.nodeBg} border ${c.b3} rounded-lg p-3`}>
+      <div className={`text-xs font-semibold ${c.t2} uppercase tracking-wider mb-0.5`}>StrategyRunner</div>
+      <div className={`text-xs font-semibold ${c.t1} mb-2`}>{strategy.name}</div>
+      <div className={`border ${c.b3} rounded p-2 mb-3 ${c.inset}`}>
+        <div className={`text-xs font-semibold ${c.t3} uppercase tracking-wider mb-1`}>StrategyGuard</div>
+        <div className={`text-xs ${c.t2} mb-1`}>
+          max_loss <span className={`${c.t1} font-mono`}>${strategy.max_loss}</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1">
           <span className={`w-1.5 h-1.5 rounded-full inline-block ${guardActive ? 'bg-emerald-400' : 'bg-red-500'}`} />
-          <span className={`text-[0.72rem] font-medium ${guardActive ? 'text-emerald-400' : 'text-red-400'}`}>
+          <span className={`text-xs font-medium ${guardActive ? 'text-emerald-400' : 'text-red-400'}`}>
             {guardActive ? 'ACTIVE' : 'HALTED'}
           </span>
         </div>
       </div>
-      <div className="text-[0.72rem] text-zinc-500 mb-1">Subscribed data:</div>
+      <div className={`text-xs ${c.t3} mb-1`}>Subscribed data:</div>
       <div className="flex flex-col gap-1">
         {(strategy.topics ?? []).map(t => (
           <Badge key={t} label={t} active={isActive(t)} />
@@ -173,16 +179,18 @@ const StrategyNodeRef = ({ strategy, isActive, nodeRef }) => {
 }
 
 function ConsolidatorNode({ topology, isActive }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   const subscribes = topology?.consolidator?.subscribes ?? []
-  const publishes  = topology?.consolidator?.publishes  ?? []
+  const publishes = topology?.consolidator?.publishes ?? []
   return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-56 max-md:w-full">
-      <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3">Consolidator</div>
-      <div className="text-[0.72rem] text-zinc-500 mb-1">Subscribes:</div>
-      <div className="flex flex-col gap-1 mb-3">
+    <div className={`${c.nodeBg} border ${c.b3} rounded-lg p-3 shrink-0`}>
+      <div className={`text-xs font-semibold ${c.t2} uppercase tracking-wider mb-2`}>Consolidator</div>
+      <div className={`text-xs ${c.t3} mb-1`}>Subscribes:</div>
+      <div className="flex flex-col gap-1 mb-2">
         {subscribes.map(s => <Badge key={s} label={s} active={isActive(s)} />)}
       </div>
-      <div className="text-[0.72rem] text-zinc-500 mb-1">Publishes:</div>
+      <div className={`text-xs ${c.t3} mb-1`}>Publishes:</div>
       <div className="flex flex-col gap-1">
         {publishes.map(s => <Badge key={s} label={s} active={isActive(s)} />)}
       </div>
@@ -191,47 +199,49 @@ function ConsolidatorNode({ topology, isActive }) {
 }
 
 function BrokerNode({ broker, recentOrders, nodeRef }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   const fmt = v => {
     const n = parseFloat(v ?? 0)
     return (n >= 0 ? '+' : '') + n.toFixed(4)
   }
   const total = parseFloat(broker?.total ?? 0)
   return (
-    <div ref={nodeRef} className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 shrink-0 w-52 max-md:w-full">
-      <div className="flex items-center gap-2 mb-3">
-        <span className={`w-2 h-2 rounded-full shrink-0 ${broker?.active ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
-        <div className="text-xs font-semibold text-zinc-300 uppercase tracking-wider truncate">
+    <div ref={nodeRef} className={`${c.nodeBg} border ${c.b3} rounded-lg p-3 shrink-0`}>
+      <div className="flex items-center gap-1.5 mb-2">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${broker?.active ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+        <div className={`text-xs font-semibold ${isDark ? 'text-zinc-300' : 'text-zinc-700'} uppercase tracking-wider truncate`}>
           {broker?.exchange ?? 'Broker'}
         </div>
       </div>
       {broker && (
-        <div className="mb-3 border border-zinc-800 rounded p-2 bg-zinc-950 space-y-1">
+        <div className={`mb-2 border ${c.b2} rounded p-1.5 ${c.inset} space-y-0.5`}>
           {broker.total_equity != null && (
             <div className="flex justify-between items-baseline">
-              <span className="text-[0.65rem] text-zinc-500 font-mono">AUM</span>
-              <span className="text-sm font-mono font-semibold text-white">${parseFloat(broker.total_equity).toFixed(2)}</span>
+              <span className={`text-xs ${c.t3} font-mono`}>AUM</span>
+              <span className={`text-xs font-mono font-semibold ${c.t1}`}>${parseFloat(broker.total_equity).toFixed(2)}</span>
             </div>
           )}
           <div className="flex justify-between items-baseline">
-            <span className="text-[0.65rem] text-zinc-500 font-mono">PnL</span>
-            <span className={`text-sm font-mono font-semibold ${total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(broker.total)}</span>
+            <span className={`text-xs ${c.t3} font-mono`}>PnL</span>
+            <span className={`text-xs font-mono font-semibold ${total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(broker.total)}</span>
           </div>
-          <div className="text-[0.65rem] text-zinc-500 font-mono">R: {fmt(broker.total_realized)}</div>
-          <div className="text-[0.65rem] text-zinc-500 font-mono">U: {fmt(broker.total_unrealized)}</div>
+          <div className={`text-xs ${c.t3} font-mono`}>R: {fmt(broker.total_realized)}</div>
+          <div className={`text-xs ${c.t3} font-mono`}>U: {fmt(broker.total_unrealized)}</div>
           {broker.available_balance != null && (
-            <div className="text-[0.65rem] text-zinc-500 font-mono">Avail: ${parseFloat(broker.available_balance).toFixed(2)}</div>
+            <div className={`text-xs ${c.t3} font-mono`}>Avail: ${parseFloat(broker.available_balance).toFixed(2)}</div>
           )}
         </div>
       )}
       {recentOrders.length === 0 ? (
-        <div className="text-zinc-600 text-[0.72rem]">No recent orders</div>
+        <div className={`${c.t4} text-xs`}>No recent orders</div>
       ) : (
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1">
           {recentOrders.slice(0, 5).map((o, i) => (
-            <div key={i} className="text-[0.72rem] font-mono bg-zinc-800 rounded px-2 py-1">
+            <div key={i} className={`text-xs font-mono ${c.nodeOrderBg} rounded px-1.5 py-0.5`}>
               <span className={o.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{o.side}</span>
-              {' '}<span className="text-zinc-300">{o.symbol}</span>
-              {' '}<span className="text-zinc-500">{o.quantity}</span>
+              {' '}<span className={isDark ? 'text-zinc-300' : 'text-zinc-700'}>{o.symbol}</span>
+              {' '}<span className={c.t3}>{o.quantity}</span>
             </div>
           ))}
         </div>
@@ -241,22 +251,24 @@ function BrokerNode({ broker, recentOrders, nodeRef }) {
 }
 
 function EmptyStrategies() {
+  const isDark = useTheme()
+  const c = th(isDark)
   return (
-    <div className="bg-zinc-900 border border-dashed border-zinc-700 rounded-lg p-6 w-72 max-md:w-full text-center self-center">
-      <div className="text-zinc-600 text-sm">No strategies running</div>
-      <div className="text-zinc-700 text-xs mt-1">Start a strategy worker to see it here</div>
+    <div className={`${c.nodeBg} border border-dashed ${c.b3} rounded-lg p-3 text-center self-center`}>
+      <div className={`${c.t4} text-xs`}>No strategies running</div>
+      <div className={`${c.t5} text-xs mt-1`}>Start a strategy worker to see it here</div>
     </div>
   )
 }
 
-// ─── Simple horizontal single arrow (hidden on mobile) ────────────────────────
-
 function SingleArrow({ subjects, isActive }) {
+  const isDark = useTheme()
+  const c = th(isDark)
   return (
-    <div className="flex flex-col items-center justify-center self-center gap-1.5 px-4 shrink-0 max-md:hidden">
+    <div className="flex flex-col items-center justify-center self-center gap-1.5 px-10 shrink-0">
       <div className="flex items-center gap-1">
-        <div className="w-6 h-px bg-zinc-700" />
-        <span className="text-zinc-600 text-sm">→</span>
+        <div className={`w-6 h-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-400'}`} />
+        <span className={`${c.t4} text-sm`}>→</span>
       </div>
       <div className="flex flex-col items-center gap-1">
         {subjects.map(s => (
@@ -294,23 +306,30 @@ function VerticalArrow({ subjects, isActive }) {
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export default function Network() {
-  const [topology, setTopology]           = useState(null)
-  const [recentOrders, setRecentOrders]   = useState({})
-  const [nodeHeights, setNodeHeights]     = useState([])
+  const isDark = useTheme()
+  const c = th(isDark)
+  const [topology, setTopology] = useState(null)
+  const [recentOrders, setRecentOrders] = useState({})
+  const [nodeHeights, setNodeHeights] = useState([])
   const [brokerHeights, setBrokerHeights] = useState([])
-  const activityRef    = useRef({})
-  const nodeRefs       = useRef([])
-  const brokerRefs     = useRef([])
-  const [now, setNow]           = useState(Date.now())
+  const activityRef = useRef({})
+  const nodeRefs = useRef([])
+  const brokerRefs = useRef([])
+  const [now, setNow] = useState(Date.now())
   const [wsStatus, setWsStatus] = useState('connecting')
   const fetchTopologyRef = useRef(null)
+  const containerRef = useRef(null)
+  const diagramRef = useRef(null)
+  const [scale, setScale] = useState(1)
+  const [scaledHeight, setScaledHeight] = useState('auto')
+  const lastWidthRef = useRef(0)
 
   useEffect(() => {
     function fetchTopology() {
       fetch('/api/topology/')
         .then(r => r.json())
         .then(setTopology)
-        .catch(() => {})
+        .catch(() => { })
     }
     fetchTopologyRef.current = fetchTopology
     fetchTopology()
@@ -339,6 +358,25 @@ export default function Network() {
     return () => clearInterval(id)
   }, [])
 
+  useLayoutEffect(() => {
+    const outer = containerRef.current
+    const inner = diagramRef.current
+    if (!outer || !inner) return
+    function compute() {
+      const outerW = outer.clientWidth
+      const innerW = inner.scrollWidth   // layout width, unaffected by transform
+      const innerH = inner.scrollHeight  // layout height, unaffected by transform
+      if (!outerW || !innerW) return
+      const s = Math.min(1, outerW / innerW)
+      setScale(s)
+      setScaledHeight(s < 1 ? innerH * s : 'auto')
+    }
+    compute()
+    const obs = new ResizeObserver(compute)
+    obs.observe(outer)
+    return () => obs.disconnect()
+  })
+
   useEffect(() => {
     let ws, stopped = false
     function connect() {
@@ -346,7 +384,7 @@ export default function Network() {
       setWsStatus('connecting')
       const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws'
       ws = new WebSocket(`${wsProto}://${window.location.host}/ws/live`)
-      ws.onopen  = () => setWsStatus('connected')
+      ws.onopen = () => setWsStatus('connected')
       ws.onclose = () => { setWsStatus('disconnected'); if (!stopped) setTimeout(connect, 2000) }
       ws.onerror = () => setWsStatus('disconnected')
       ws.onmessage = e => {
@@ -364,7 +402,7 @@ export default function Network() {
           }
           if (msg.subject?.startsWith('strategy.register.') || msg.subject?.startsWith('strategy.unregister.'))
             fetchTopologyRef.current?.()
-        } catch {}
+        } catch { }
       }
     }
     connect()
@@ -379,17 +417,17 @@ export default function Network() {
   }
 
   const strategies = topology?.strategies ?? []
-  const brokers    = topology?.brokers    ?? []
-  const n  = strategies.length
+  const brokers = topology?.brokers ?? []
+  const n = strategies.length
   const nb = brokers.length
 
   const publishedSubjects = strategies.length > 0
     ? [...new Set(strategies.flatMap(s => s.topics ?? []))].sort()
     : [...new Set(
-        Object.entries(activityRef.current)
-          .filter(([s, ts]) => (s.startsWith('futures.') || s.startsWith('spot.')) && now - ts < FEED_TTL)
-          .map(([s]) => s)
-      )].sort()
+      Object.entries(activityRef.current)
+        .filter(([s, ts]) => (s.startsWith('futures.') || s.startsWith('spot.')) && now - ts < FEED_TTL)
+        .map(([s]) => s)
+    )].sort()
 
   const heights = nodeHeights.length === n && n > 0
     ? nodeHeights
@@ -399,38 +437,55 @@ export default function Network() {
     ? brokerHeights
     : brokers.map(() => 180)
 
+  // SVG color palette from theme
+  const svgColors = {
+    svgActive: c.svgActive,
+    svgInactive: c.svgInactive,
+    svgLabelBg: c.svgLabelBg,
+    svgLabelBorderA: c.svgLabelBorderA,
+    svgLabelBorderI: c.svgLabelBorderI,
+    svgLabelTextA: c.svgLabelTextA,
+    svgLabelTextI: c.svgLabelTextI,
+  }
+
   return (
-    <div className="flex flex-col min-h-full">
+    <div className="flex flex-col min-h-full w-full min-w-0 ">
       {/* Status bar */}
       <div className="flex items-center gap-2 mb-6">
-        <span className={`inline-block w-2 h-2 rounded-full ${
-          wsStatus === 'connected'    ? 'bg-emerald-400' :
-          wsStatus === 'connecting'   ? 'bg-yellow-400'  : 'bg-red-500'
-        }`} />
-        <span className="text-[0.72rem] text-zinc-500">
-          {wsStatus === 'connected'   ? 'Live' :
-           wsStatus === 'connecting'  ? 'Connecting…' : 'Disconnected — retrying'}
+        <span className={`inline-block w-2 h-2 rounded-full ${wsStatus === 'connected' ? 'bg-emerald-400' :
+          wsStatus === 'connecting' ? 'bg-yellow-400' : 'bg-red-500'
+          }`} />
+        <span className={`text-[0.72rem] ${c.t3}`}>
+          {wsStatus === 'connected' ? 'Live' :
+            wsStatus === 'connecting' ? 'Connecting…' : 'Disconnected — retrying'}
         </span>
       </div>
 
-      {/* Main diagram */}
-      <div className="flex items-center overflow-x-auto max-md:flex-col max-md:overflow-x-visible">
+      {/* Main diagram — scales to fill container width exactly */}
+      <div ref={containerRef} className="w-full overflow-hidden" style={{ height: scaledHeight }}>
+        <div ref={diagramRef} className="flex items-center" style={{ transformOrigin: 'top left', transform: `scale(${scale})`, width: 'max-content' }}>
 
-        {/* Feed server */}
-        <FeedServerNode publishedSubjects={publishedSubjects} isActive={isActive} />
+          <FeedServerNode publishedSubjects={publishedSubjects} isActive={isActive} />
 
-        {/* Feed → strategies */}
-        <VerticalArrow subjects={strategies[0]?.topics ?? publishedSubjects} isActive={isActive} />
-        {n > 1 ? (
-          <FanSvg heights={heights} getTopics={i => strategies[i]?.topics ?? []} fanIn={false} isActive={isActive} uid="feed-strat" />
-        ) : (
-          <SingleArrow subjects={strategies[0]?.topics ?? publishedSubjects} isActive={isActive} />
-        )}
+          {n > 1 ? (
+            <FanSvg
+              heights={heights}
+              getTopics={i => strategies[i]?.topics ?? []}
+              fanIn={false}
+              isActive={isActive}
+              uid="feed-strat"
+              colors={svgColors}
+            />
+          ) : (
+            <SingleArrow
+              subjects={strategies[0]?.topics ?? publishedSubjects}
+              isActive={isActive}
+            />
+          )}
 
-        {/* Strategy nodes column */}
-        <div className="flex flex-col shrink-0 max-md:w-full" style={{ gap: NODE_GAP }}>
-          {n > 0
-            ? strategies.map((s, i) => (
+          <div className="flex flex-col shrink-0" style={{ gap: NODE_GAP }}>
+            {n > 0
+              ? strategies.map((s, i) => (
                 <StrategyNodeRef
                   key={s.name}
                   strategy={s}
@@ -438,33 +493,44 @@ export default function Network() {
                   nodeRef={el => { nodeRefs.current[i] = el }}
                 />
               ))
-            : <EmptyStrategies />
-          }
-        </div>
+              : <EmptyStrategies />
+            }
+          </div>
 
-        {/* Strategies → consolidator */}
-        <VerticalArrow subjects={['signals.targets.*']} isActive={isActive} />
-        {n > 1 ? (
-          <FanSvg heights={heights} getTopics={i => [`signals.targets.${strategies[i]?.name}`]} fanIn={true} isActive={isActive} uid="strat-cons" />
-        ) : (
-          <SingleArrow subjects={['signals.targets.*']} isActive={isActive} />
-        )}
+          {n > 1 ? (
+            <FanSvg
+              heights={heights}
+              getTopics={i => [`signals.targets.${strategies[i]?.name}`]}
+              fanIn={true}
+              isActive={isActive}
+              uid="strat-cons"
+              colors={svgColors}
+            />
+          ) : (
+            <SingleArrow
+              subjects={['signals.targets.*']}
+              isActive={isActive}
+            />
+          )}
 
-        {/* Consolidator */}
-        <ConsolidatorNode topology={topology} isActive={isActive} />
+          <ConsolidatorNode topology={topology} isActive={isActive} />
 
-        {/* Consolidator → brokers */}
-        <VerticalArrow subjects={['orders.placed.*']} isActive={isActive} />
-        {nb > 1 ? (
-          <FanSvg heights={bHeights} getTopics={() => ['orders.placed.*']} fanIn={false} isActive={isActive} uid="cons-broker" />
-        ) : (
-          <SingleArrow subjects={['orders.placed.*']} isActive={isActive} />
-        )}
+          {nb > 1 ? (
+            <FanSvg
+              heights={bHeights}
+              getTopics={() => ['orders.placed.*']}
+              fanIn={false}
+              isActive={isActive}
+              uid="cons-broker"
+              colors={svgColors}
+            />
+          ) : (
+            <SingleArrow subjects={['orders.placed.*']} isActive={isActive} />
+          )}
 
-        {/* Broker column */}
-        <div className="flex flex-col shrink-0 max-md:w-full" style={{ gap: NODE_GAP }}>
-          {nb > 0
-            ? brokers.map((b, i) => (
+          <div className="flex flex-col shrink-0" style={{ gap: NODE_GAP }}>
+            {nb > 0
+              ? brokers.map((b, i) => (
                 <BrokerNode
                   key={b.exchange}
                   broker={b}
@@ -472,8 +538,9 @@ export default function Network() {
                   nodeRef={el => { brokerRefs.current[i] = el }}
                 />
               ))
-            : <BrokerNode broker={null} recentOrders={[]} nodeRef={el => { brokerRefs.current[0] = el }} />
-          }
+              : <BrokerNode broker={null} recentOrders={[]} nodeRef={el => { brokerRefs.current[0] = el }} />
+            }
+          </div>
         </div>
       </div>
     </div>
