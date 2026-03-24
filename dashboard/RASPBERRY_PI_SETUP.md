@@ -1,17 +1,15 @@
 # Raspberry Pi Setup
 
-The Pi runs:
-- `dashboard/frontend` — Vite dev server (port 5173)
-- `dashboard/app.py` — API routes only (port 8000)
+The Pi runs everything locally:
+- `nats-server` — message bus (port 4222)
+- `workers.datafeed_server` — publishes Binance data to NATS
+- `workers.strategy_worker` — runs strategies, emits signals via NATS
+- `workers.consolidator_worker` — nets signals, places orders via broker
+- `workers.dashboard` — FastAPI + NATS bridge + WebSocket (port 8000)
 - `cloudflared` — tunnel to qrfzurich.com
 
-The broker/engine/NATS runs remotely on a separate machine.
-Vite proxies `/api` and `/ws` to `localhost:8000` (app.py).
-
-**Note:** `nats_bridge.py` is not yet wired into `app.py`.
-Until it is, the dashboard loads fine but all data panels are empty.
-When wired up, set `NATS_URL=nats://<remote-ip>:4222` on the Pi
-so the bridge connects to the remote NATS server.
+The dashboard connects directly to the local NATS server and relays
+events to the browser via WebSocket. No remote HTTP push needed.
 
 ---
 
@@ -28,7 +26,13 @@ uv sync
 # 3. Node deps + build frontend
 cd dashboard/frontend && npm install && npm run build && cd ../..
 
-# 4. Install cloudflared (ARM64)
+# 4. Install nats-server (ARM64)
+curl -L https://github.com/nats-io/nats-server/releases/latest/download/nats-server-v2.10.24-linux-arm64.tar.gz \
+  -o /tmp/nats.tar.gz
+tar -xzf /tmp/nats.tar.gz -C /usr/local/bin --strip-components=1
+chmod +x /usr/local/bin/nats-server
+
+# 5. Install cloudflared (ARM64)
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 \
   -o /usr/local/bin/cloudflared
 chmod +x /usr/local/bin/cloudflared
@@ -38,7 +42,6 @@ chmod +x /usr/local/bin/cloudflared
 
 ```bash
 # Run on your Mac (from the Infrastructure directory):
-# Create the directory on the Pi first (scp won't create it automatically)
 ssh carloteufel@raspberrypi "mkdir -p ~/.cloudflared"
 scp ~/.cloudflared/cert.pem carloteufel@raspberrypi:~/.cloudflared/cert.pem
 scp ~/.cloudflared/89279296-baf5-4a40-b2f2-62373d950574.json \
@@ -51,13 +54,25 @@ scp dashboard/cloudflared-config.yml \
 
 ## Running
 
-Open 3 terminals (or use tmux):
+Open terminals (or use tmux):
 
 ```bash
-# Terminal 1 — backend API
-uvicorn dashboard.app:app --port 8000
+# Terminal 1 — NATS
+nats-server
 
-# Terminal 2 — tunnel
+# Terminal 2 — data feed
+uv run python -m workers.datafeed_server
+
+# Terminal 3 — strategy worker
+STRATEGY_NAME=Example uv run python -m workers.strategy_worker
+
+# Terminal 4 — consolidator
+uv run python -m workers.consolidator_worker
+
+# Terminal 5 — dashboard
+uv run uvicorn workers.dashboard:app --port 8000
+
+# Terminal 6 — tunnel
 cloudflared tunnel --config dashboard/cloudflared-config.yml run my-dashboard
 ```
 
