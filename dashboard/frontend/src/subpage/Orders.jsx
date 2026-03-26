@@ -32,7 +32,7 @@ export default function Orders() {
 
   return (
     <div className="flex flex-col h-full">
-      <p className={`${c.t1} font-bold font-notion-inter my-3 text-[32px] leading-[1.1]`}>Orders</p>
+      <p className={`${c.t1} font-bold font-notion-inter my-3 text-2xl md:text-[32px] leading-[1.1]`}>Orders</p>
       {error && <p className="text-red-500 text-[11px] mb-2">{error}</p>}
 
       <div className="overflow-y-auto h-140">

@@ -49,18 +49,18 @@ function Home() {
 
   return (
     <div className="flex flex-col gap-8">
-      <div className="flex gap-6 h-full">
+      <div className="flex flex-col lg:flex-row gap-6 h-full">
         <div className={`flex-1 min-w-0 pt-1 ${c.b1}`}>
           <Performance />
         </div>
-        <div className={`w-72 shrink-0  ${c.b1} pl-6 `}>
+        <div className={`w-full lg:w-72 lg:shrink-0 ${c.b1} border-t lg:border-t-0 lg:border-l pt-6 lg:pt-0 lg:pl-6`}>
           <Orders />
         </div>
       </div>
 
       {strategyIds.length > 0 && (
         <div className="flex flex-col gap-6">
-          <h2 className={`${c.t1} font-bold font-notion-inter text-[32px] leading-[1.1]`}>Strategy Performance</h2>
+          <h2 className={`${c.t1} font-bold font-notion-inter text-2xl md:text-[32px] leading-[1.1]`}>Strategy Performance</h2>
           <div className="grid grid-cols-1 gap-6">
             {strategyIds.map(sid => (
               <div key={sid} className={`${c.card} border ${c.b1} rounded-xl p-5`}>
@@ -245,9 +245,9 @@ function PositionDetail({ position: detail }) {
   ]
 
   return (
-    <div className={`rounded-xl border ${c.b1} ${c.card} p-6 flex gap-6 ${detail.status === 'closed' ? 'opacity-50' : ''}`}>
+    <div className={`rounded-xl border ${c.b1} ${c.card} p-4 md:p-6 flex flex-col md:flex-row gap-4 md:gap-6 ${detail.status === 'closed' ? 'opacity-50' : ''}`}>
       {/* Left: info */}
-      <div className="flex flex-col gap-5 w-72 shrink-0">
+      <div className="flex flex-col gap-5 w-full md:w-72 md:shrink-0">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <h3 className={`${c.t1} text-2xl font-bold`}>{detail.symbol}</h3>
@@ -453,14 +453,14 @@ function App() {
   return (
     <ThemeContext.Provider value={isDark}>
       <div className={`flex flex-col min-h-screen ${c.bg}`}>
-        <header className={`flex items-center gap-8 px-8 h-20 ${c.header} border-b ${c.b1}`}>
-          <img src={isDark ? logoDark : logoLight} alt="logo" className="h-16 w-auto object-contain" />
-          <nav className="flex gap-1">
+        <header className={`flex items-center gap-3 md:gap-8 px-4 md:px-8 h-14 md:h-20 ${c.header} border-b ${c.b1}`}>
+          <img src={isDark ? logoDark : logoLight} alt="logo" className="h-8 md:h-16 w-auto object-contain shrink-0" />
+          <nav className="flex gap-1 overflow-x-auto">
             {TABS.map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`px-3.5 py-1.5 rounded-md text-[1.1rem] cursor-pointer transition-colors duration-75 border-0 ${activeTab === tab ? c.navA : `bg-transparent ${c.navI}`}`}
+                className={`px-3 md:px-3.5 py-1.5 rounded-md text-[0.85rem] md:text-[1.1rem] cursor-pointer transition-colors duration-75 border-0 whitespace-nowrap ${activeTab === tab ? c.navA : `bg-transparent ${c.navI}`}`}
               >
                 {tab}
               </button>
@@ -470,7 +470,7 @@ function App() {
             <ThemeToggle isDark={isDark} onToggle={() => setIsDark(d => !d)} />
           </div>
         </header>
-        <main className="p-8 flex-1">
+        <main className="p-4 md:p-8 flex-1">
           {TABS.map(tab => {
             const Page = PAGES[tab]
             return (

@@ -1,0 +1,7 @@
+tunnel: my-dashboard
+credentials-file: /home/carloteufel/.cloudflared/89279296-baf5-4a40-b2f2-62373d950574.json
+
+ingress:
+  - hostname: qrfzurich.com
+    service: http://localhost:5173
+  - service: http_status:404

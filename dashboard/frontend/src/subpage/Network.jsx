@@ -38,7 +38,7 @@ function FanSvg({ heights, getTopics, fanIn = false, isActive, uid, colors }) {
   const fwdAId = `${uid}-fwd-a`
 
   return (
-    <svg width={W} height={totalH} className="shrink-0 overflow-visible" style={{ alignSelf: 'center' }}>
+    <svg width={W} height={totalH} className="shrink-0 overflow-visible max-md:hidden" style={{ alignSelf: 'center' }}>
       <defs>
         <marker id={fwdId} markerWidth="6" markerHeight="5" refX="5" refY="2.5" orient="auto">
           <polygon points="0 0,6 2.5,0 5" fill={colors.svgInactive} />
@@ -279,6 +279,30 @@ function SingleArrow({ subjects, isActive }) {
   )
 }
 
+// ─── Vertical arrow connector (mobile only) ───────────────────────────────────
+
+function VerticalArrow({ subjects, isActive }) {
+  return (
+    <div className="hidden max-md:flex flex-col items-center py-1">
+      <div className="w-px h-4 bg-zinc-700" />
+      {subjects.length > 0 && (
+        <div className="flex flex-wrap justify-center gap-1 py-1.5">
+          {subjects.slice(0, 3).map(s => (
+            <Badge key={s} label={s} active={isActive(s)} />
+          ))}
+          {subjects.length > 3 && (
+            <Badge label={`+${subjects.length - 3} more`} active={false} />
+          )}
+        </div>
+      )}
+      <div className="w-px h-4 bg-zinc-700" />
+      <svg width="10" height="6" viewBox="0 0 10 6">
+        <polygon points="0,0 10,0 5,6" fill="#3d5268" />
+      </svg>
+    </div>
+  )
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export default function Network() {
@@ -358,7 +382,8 @@ export default function Network() {
     function connect() {
       if (stopped) return
       setWsStatus('connecting')
-      ws = new WebSocket(`ws://${window.location.host}/ws/live`)
+      const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      ws = new WebSocket(`${wsProto}://${window.location.host}/ws/live`)
       ws.onopen = () => setWsStatus('connected')
       ws.onclose = () => { setWsStatus('disconnected'); if (!stopped) setTimeout(connect, 2000) }
       ws.onerror = () => setWsStatus('disconnected')
