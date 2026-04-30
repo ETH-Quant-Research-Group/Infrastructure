@@ -35,10 +35,11 @@ import nats.aio.client
 import nats.aio.msg
 
 from config import NATS_URL
+from decimal import ROUND_HALF_UP
 from engine.data import codec
 from engine.order.consolidator import OrderConsolidator
 from execution.brokers.bybit import BybitBroker
-from execution.brokers.paper import PaperBroker
+from execution.brokers.bybit_spot import BybitSpotBroker
 from execution.types import FillConfirmation, Order, OrderSide, OrderType, PerpOrder
 
 if TYPE_CHECKING:
@@ -60,10 +61,8 @@ _DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_demo").lower()
 def _build_brokers() -> dict[str, BaseBroker]:
     """Instantiate every broker that should be active for this run."""
     brokers: dict[str, BaseBroker] = {
-        "paper": PaperBroker(),
-        "bybit_demo": BybitBroker(
-            demo=True
-        ),  # requires BYBIT_API_KEY + BYBIT_API_SECRET
+        "bybit_demo": BybitBroker(demo=True),   # requires BYBIT_API_KEY + BYBIT_API_SECRET
+        "bybit_spot": BybitSpotBroker(demo=True),
         # "bybit":      BybitBroker(demo=False),  # live trading — be careful
     }
     log.info(
@@ -84,15 +83,21 @@ def _build_brokers() -> dict[str, BaseBroker]:
 
 
 def _order_factory(
-    symbol: str, side: OrderSide, quantity: Decimal, price: Decimal
+    symbol: str, side: OrderSide, quantity: Decimal, _price: Decimal,
+    exchange: str = "",
 ) -> Order:
-    order_type = OrderType.LIMIT if price > Decimal(0) else OrderType.MARKET
+    # Spot orders use fractional quantities (e.g. 5.994 ETH).
+    # Perp contracts are sized in whole contracts — round to integer.
+    if exchange == "bybit_spot":
+        quantity = quantity.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    else:
+        quantity = quantity.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return PerpOrder(
         symbol=symbol,
         side=side,
-        order_type=order_type,
+        order_type=OrderType.MARKET,
         quantity=quantity,
-        price=price,
+        price=Decimal(0),
     )
 
 
@@ -135,42 +140,129 @@ async def _publish_broker_pnl(
     brokers: dict[str, BaseBroker],
     interval: float = 5.0,
 ) -> None:
-    """Publish a PnL snapshot for every broker that exposes pnl properties."""
+    """Publish PnL snapshots for every broker.
+
+    Delta-neutral accounting (perp short + spot long hedge):
+
+      perp realized   = USDT wallet-balance delta since session start.
+                        This is the only true cash flow: funding payments
+                        credit/debit USDT every 8 h and fees are charged on
+                        each trade.  It NEVER fluctuates with price.
+
+      perp unrealized = totalUnrealisedPnl (mark-to-market on open perp).
+                        Negative for a short when price rises, positive when
+                        price falls.
+
+      spot realized   = 0  (no cash is received until coins are actually sold)
+
+      spot unrealized = spotCoinEquity delta since session start.
+                        Positive when price rises (mirrors perp unrealized sign).
+
+    Aggregate:
+      total_realized   ≈ accumulated funding income   (stacks up every 8 h, never
+                          reverts unless negative funding)
+      total_unrealized ≈ 0 for a well-hedged position (perp and spot legs cancel)
+      total            = realized + unrealized
+    """
+    _baselines: dict[str, Decimal] = {}
+
     while True:
         await asyncio.sleep(interval)
         ts = datetime.now(UTC).isoformat()
         total_realized = Decimal(0)
         total_unrealized = Decimal(0)
+
         for exchange, broker in brokers.items():
-            if not (
-                hasattr(broker, "total_realized_pnl")
-                and hasattr(broker, "total_unrealized_pnl")
-            ):
-                continue
-            realized = broker.total_realized_pnl
-            unrealized = broker.total_unrealized_pnl
-            total_realized += realized
-            total_unrealized += unrealized
-            payload: dict[str, Any] = {
-                "exchange": exchange,
-                "total_realized": str(realized),
-                "total_unrealized": str(unrealized),
-                "total": str(realized + unrealized),
-                "timestamp": ts,
-            }
-            # Fetch live wallet balance (AUM) for brokers that support it
+            payload: dict[str, Any] | None = None
+
             if hasattr(broker, "wallet_balance"):
                 wb = await broker.wallet_balance()
-                if wb:
-                    payload["total_equity"] = wb.get("totalEquity", "")
-                    payload["total_wallet_balance"] = wb.get("totalWalletBalance", "")
-                    payload["available_balance"] = wb.get("totalAvailableBalance", "")
-            # Per-exchange subject so the dashboard can show each broker separately
-            await nc.publish(
-                f"broker.pnl.{exchange}",
-                json.dumps(payload).encode(),
-            )
-        # Aggregate across all brokers on the plain broker.pnl subject
+                if not wb:
+                    continue
+
+                if "spotCoinEquity" in wb:
+                    # ---- Spot leg ----
+                    # The change in coin USD-value is unrealized (not cash).
+                    # It offsets the perp unrealized so the fund net ≈ 0.
+                    equity = Decimal(str(wb.get("spotCoinEquity", "0") or "0"))
+                    if exchange not in _baselines:
+                        _baselines[exchange] = equity
+                    spot_unrealized = equity - _baselines[exchange]
+
+                    total_unrealized += spot_unrealized
+                    payload = {
+                        "exchange": exchange,
+                        "total_realized": "0",
+                        "total_unrealized": str(spot_unrealized),
+                        "total": str(spot_unrealized),
+                        "total_equity": str(equity),
+                        "timestamp": ts,
+                    }
+
+                else:
+                    # ---- Perp leg ----
+                    total_equity = Decimal(str(wb.get("totalEquity", "0") or "0"))
+                    unrealized = Decimal(str(wb.get("totalUnrealisedPnl", "0") or "0"))
+                    wallet = Decimal(str(wb.get("totalWalletBalance", "0") or "0"))
+                    available = str(wb.get("totalAvailableBalance", "") or "")
+                    coins = wb.get("coin", [])
+
+                    # Realized PnL = delta of cumRealisedPnl since startup.
+                    # Baselining means historical losses from previous sessions
+                    # are excluded — only new funding payments and fees count.
+                    positions = await broker.list_positions()
+                    cum_realized = sum(
+                        (p.realized_pnl for p in positions), Decimal(0)
+                    )
+                    realized_key = f"{exchange}_cum_realized"
+                    if realized_key not in _baselines:
+                        _baselines[realized_key] = cum_realized
+                    pnl_realized = cum_realized - _baselines[realized_key]
+
+                    # Perp MTM: negative for short when price rises.
+                    pnl_unrealized = unrealized
+                    pnl_total = pnl_realized + pnl_unrealized
+
+                    # AUM = totalEquity minus spot-coin values (spot tracked separately)
+                    spot_usd = Decimal(str(sum(
+                        float(c.get("usdValue", 0) or 0)
+                        for c in (coins if isinstance(coins, list) else [])
+                        if c.get("coin") not in ("USDT", "USDC")
+                    )))
+                    perp_equity = total_equity - spot_usd
+
+                    total_realized += pnl_realized
+                    total_unrealized += pnl_unrealized
+
+                    payload = {
+                        "exchange": exchange,
+                        "total_realized": str(pnl_realized),
+                        "total_unrealized": str(pnl_unrealized),
+                        "total": str(pnl_total),
+                        "total_equity": str(perp_equity),
+                        "total_wallet_balance": str(wallet),
+                        "available_balance": available,
+                        "timestamp": ts,
+                    }
+
+            elif hasattr(broker, "total_realized_pnl") and hasattr(broker, "total_unrealized_pnl"):
+                # Fallback for brokers without wallet_balance (e.g. paper broker)
+                realized = broker.total_realized_pnl
+                unrealized = broker.total_unrealized_pnl
+                total_realized += realized
+                total_unrealized += unrealized
+                payload = {
+                    "exchange": exchange,
+                    "total_realized": str(realized),
+                    "total_unrealized": str(unrealized),
+                    "total": str(realized + unrealized),
+                    "timestamp": ts,
+                }
+
+            if payload is not None:
+                await nc.publish(f"broker.pnl.{exchange}", json.dumps(payload).encode())
+
+        # Aggregate across all brokers
         await nc.publish(
             "broker.pnl",
             json.dumps(
@@ -190,25 +282,49 @@ async def _publish_positions(
     consolidator: OrderConsolidator,
     interval: float = 5.0,
 ) -> None:
-    """Query every broker for its tracked symbols and publish a unified snapshot."""
+    """Query every broker for its open positions and publish a unified snapshot."""
     while True:
         await asyncio.sleep(interval)
         snapshot: list[dict[str, Any]] = []
         for exchange, broker in consolidator.brokers.items():
-            symbols = consolidator.tracked_symbols_for(exchange)
-            for symbol in symbols:
-                pos = await broker.position(symbol)
-                if pos is not None:
-                    snapshot.append(
-                        {
-                            "symbol": pos.symbol,
-                            "exchange": exchange,
-                            "quantity": str(pos.quantity),
-                            "avg_entry_price": str(pos.avg_entry_price),
-                            "unrealized_pnl": str(pos.unrealized_pnl),
-                            "realized_pnl": str(pos.realized_pnl),
-                        }
-                    )
+            # Prefer list_positions() which returns all open positions without
+            # needing in-memory tracking (survives consolidator restarts).
+            if hasattr(broker, "list_positions"):
+                positions = await broker.list_positions()
+            else:
+                symbols = consolidator.tracked_symbols_for(exchange)
+                positions = [p for s in symbols if (p := await broker.position(s)) is not None]
+            for pos in positions:
+                snapshot.append(
+                    {
+                        "symbol": pos.symbol,
+                        "exchange": exchange,
+                        "quantity": str(pos.quantity),
+                        "avg_entry_price": str(pos.avg_entry_price),
+                        "unrealized_pnl": str(pos.unrealized_pnl),
+                        "realized_pnl": str(pos.realized_pnl),
+                    }
+                )
+        # Cross-reference perp avg entry prices to compute spot unrealized PnL.
+        # Bybit spot API has no concept of unrealized PnL — we derive it using
+        # the corresponding perp leg's entry price as the reference (both legs
+        # were entered simultaneously at approximately the same price).
+        # spot_unrealized = (current_price - perp_entry) * spot_qty
+        perp_entries: dict[str, Decimal] = {}
+        for p in snapshot:
+            if p["exchange"] == "bybit_demo":
+                entry = Decimal(p["avg_entry_price"])
+                if entry > Decimal(0):
+                    perp_entries[p["symbol"]] = entry
+
+        for p in snapshot:
+            if p["exchange"] == "bybit_spot" and p["symbol"] in perp_entries:
+                spot_qty = Decimal(p["quantity"])
+                # avg_entry_price for spot = current price (usdValue/qty from wallet)
+                current_price = Decimal(p["avg_entry_price"])
+                perp_entry = perp_entries[p["symbol"]]
+                p["unrealized_pnl"] = str((current_price - perp_entry) * spot_qty)
+
         payload = json.dumps(snapshot).encode()
         await nc.publish("positions.snapshot", payload)
         log.debug("published positions snapshot: %d positions", len(snapshot))
@@ -228,6 +344,62 @@ async def _publish_fills(
             fill.fill_price,
             fill.strategy_id,
         )
+
+
+async def _replay_recent_orders(
+    nc: nats.aio.client.Client,
+    brokers: dict[str, Any],
+    delay: float = 3.0,
+) -> None:
+    """Publish recent Bybit fill history to NATS shortly after startup.
+
+    This re-populates the dashboard's Orders panel after a backend restart
+    without requiring the backend to have direct Bybit credentials.
+    Only replays fills from the current UTC day to avoid flooding with history.
+    """
+    await asyncio.sleep(delay)
+    from datetime import UTC, datetime
+
+    today = datetime.now(UTC).date().isoformat()
+    for exchange, broker in brokers.items():
+        if not hasattr(broker, "recent_fills"):
+            continue
+        try:
+            fills = await broker.recent_fills(limit=100)
+        except Exception as exc:
+            log.warning("Could not replay recent fills for %s: %s", exchange, exc)
+            continue
+        published = 0
+        for f in fills:
+            # Only replay today's orders — skip older history
+            if f.get("created_time", "") != today:
+                continue
+            payload = json.dumps({
+                "symbol": f.get("symbol", ""),
+                "side": f.get("side", ""),
+                "order_type": f.get("order_type", ""),
+                "quantity": f.get("quantity", "0"),
+                "price": f.get("price", "0"),
+                "reduce_only": f.get("reduce_only", False),
+            }).encode()
+            symbol = f.get("symbol", "unknown")
+            await nc.publish(f"orders.placed.{exchange}.{symbol}", payload)
+            published += 1
+        if published:
+            log.info("Replayed %d recent orders for %s", published, exchange)
+
+
+async def _serve_replay_requests(
+    nc: nats.aio.client.Client,
+    brokers: dict[str, Any],
+) -> None:
+    """Listen for on-demand replay requests from the dashboard after restarts."""
+
+    async def _on_request(msg: nats.aio.msg.Msg) -> None:
+        await _replay_recent_orders(nc, brokers, delay=0.0)
+
+    await nc.subscribe("control.replay.orders", cb=_on_request)
+    await asyncio.get_running_loop().create_future()
 
 
 async def _feed_market_prices(
@@ -275,7 +447,7 @@ async def main() -> None:
         target_queue=target_queue,
         brokers=brokers,
         default_exchange=_DEFAULT_EXCHANGE,
-        min_order_size=Decimal("0.001"),
+        min_order_size=Decimal("1"),  # ignore sub-1-unit residuals from rounding
         placed_queue=placed_queue,
         fills_queue=fills_queue,
         order_factory=_order_factory,
@@ -283,14 +455,19 @@ async def main() -> None:
 
     nc = await nats.connect(NATS_URL)
     try:
+        # Seed consolidator with live broker positions so that restarts while
+        # positions are open do not produce spurious orders.
+        await consolidator.seed_from_broker()
+
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_bridge_targets(nc, target_queue))
             tg.create_task(consolidator.run())
             tg.create_task(_publish_placed_orders(nc, placed_queue))
             tg.create_task(_publish_fills(nc, fills_queue))
-            tg.create_task(_publish_positions(nc, consolidator))
-            tg.create_task(_publish_broker_pnl(nc, brokers))
+            tg.create_task(_publish_positions(nc, consolidator, interval=3.0))
+            tg.create_task(_publish_broker_pnl(nc, brokers, interval=3.0))
             tg.create_task(_feed_market_prices(nc, brokers))
+            tg.create_task(_serve_replay_requests(nc, brokers))
     finally:
         for broker in brokers.values():
             await broker.aclose()

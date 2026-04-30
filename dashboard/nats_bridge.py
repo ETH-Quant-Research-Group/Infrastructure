@@ -19,6 +19,7 @@ from dashboard.store import (
     record_bar,
     record_broker_exchange_pnl,
     record_broker_pnl,
+    record_feed_server_activity,
     record_fill,
     record_order,
     record_pnl,
@@ -49,6 +50,9 @@ async def start(nc: nats.aio.client.Client) -> None:
             data = json.loads(msg.data)
         except Exception:
             data = msg.data.decode()
+
+        if msg.subject.startswith("futures."):
+            record_feed_server_activity()
 
         if (
             msg.subject.startswith("futures.")

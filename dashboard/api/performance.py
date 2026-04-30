@@ -85,21 +85,22 @@ async def get_broker_pnl() -> dict:
 
 @router.get("/fund")
 async def get_fund() -> dict:
-    """Fund-level snapshot: AUM, PnL & available balance summed across all brokers."""
+    """Fund-level snapshot: AUM, PnL & available balance summed across all brokers.
+
+    PnL is taken from the atomic aggregate ``broker.pnl`` snapshot (published by
+    the consolidator after *both* legs are computed in the same loop iteration).
+    This avoids the timing mismatch where individual per-exchange messages arrive
+    a few ms apart, causing the fund total to momentarily spike before the second
+    leg updates — which matters for delta-neutral strategies where the two legs
+    should cancel.
+    """
     total_aum = 0.0
     total_wallet = 0.0
     total_available = 0.0
-    total_realized = 0.0
-    total_unrealized = 0.0
     brokers_with_aum = []
     brokers_without_aum = []
 
     for exchange, state in broker_exchange_states.items():
-        realized = float(state.get("total_realized", "0") or "0")
-        unrealized = float(state.get("total_unrealized", "0") or "0")
-        total_realized += realized
-        total_unrealized += unrealized
-
         if state.get("total_equity"):
             total_aum += float(state["total_equity"])
             total_wallet += float(state.get("total_wallet_balance", "0") or "0")
@@ -108,6 +109,15 @@ async def get_fund() -> dict:
         else:
             brokers_without_aum.append(exchange)
 
+    # Use the atomic aggregate published after both legs are summed.
+    if broker_pnl_latest:
+        total_realized = float(broker_pnl_latest["total_realized"])
+        total_unrealized = float(broker_pnl_latest["total_unrealized"])
+    else:
+        # Fallback before the first aggregate arrives
+        total_realized = sum(float(s.get("total_realized", 0) or 0) for s in broker_exchange_states.values())
+        total_unrealized = sum(float(s.get("total_unrealized", 0) or 0) for s in broker_exchange_states.values())
+
     return {
         "total_aum": round(total_aum, 4) or None,
         "total_wallet_balance": round(total_wallet, 4) or None,
@@ -115,8 +125,6 @@ async def get_fund() -> dict:
         "total_pnl": round(total_realized + total_unrealized, 4),
         "total_realized": round(total_realized, 4),
         "total_unrealized": round(total_unrealized, 4),
-        # AUM only covers brokers that report wallet balance (e.g. BybitBroker).
-        # Paper brokers don't have a real account balance so they're excluded.
         "aum_covers": brokers_with_aum,
         "aum_excludes": brokers_without_aum,
         "num_brokers": len(broker_exchange_states),

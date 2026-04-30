@@ -135,12 +135,15 @@ class FillConfirmation:
     ``fill_price`` is the actual broker execution price when an order was sent,
     or the signal's reference price (bar close) when trades internally netted
     and no broker order was placed.
+    ``exchange`` is the broker name (e.g. "bybit_demo", "bybit_spot") so
+    consumers can decide whether to include this fill in PnL tracking.
     """
 
     strategy_id: str
     symbol: str
     quantity: Decimal  # signed: positive = bought, negative = sold
     fill_price: Decimal
+    exchange: str = ""
 
 
 # ---------------------------------------------------------------------------

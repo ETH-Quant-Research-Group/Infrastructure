@@ -30,35 +30,45 @@ class _SymbolPosition:
 class PnLCalc:
     """Per-strategy PnL tracker that maintains its own position state.
 
-    Tracks each symbol's open quantity, average entry price, and realized PnL
-    independently of the broker.  This allows accurate per-strategy attribution
-    even when multiple strategies trade the same symbol through the shared
-    :class:`~engine.order.consolidator.OrderConsolidator`.
+    Tracks each (symbol, exchange) leg's open quantity, average entry price,
+    and realized PnL independently of the broker.  Using (symbol, exchange) as
+    the key allows a delta-neutral strategy's spot BUY and perp SELL on the
+    same symbol to be tracked as separate legs so their unrealized PnL
+    correctly offsets rather than cancelling to zero.
 
     Feed it from two sources:
-    - :meth:`on_fill` — called by the consolidator whenever an order is placed
-      for this strategy, with the signed quantity delta and fill price.
-    - :meth:`update_market_price` — called by the runner on every bar to keep
-      unrealized PnL current.
+    - :meth:`on_fill` — called whenever a fill arrives, with the signed
+      quantity delta, fill price, and exchange name.
+    - :meth:`update_market_price` — called on every bar to keep unrealized
+      PnL current across all legs for that symbol.
     """
 
     def __init__(self) -> None:
-        self._positions: dict[str, _SymbolPosition] = {}
+        # key: (symbol, exchange)
+        self._positions: dict[tuple[str, str], _SymbolPosition] = {}
         self._latest: dict[str, PnLSnapshot] = {}
         self._history: list[PnLSnapshot] = []
 
     # ------------------------------------------------------------------ writes
 
-    def on_fill(self, symbol: str, qty_delta: Decimal, fill_price: Decimal) -> None:
+    def on_fill(
+        self,
+        symbol: str,
+        qty_delta: Decimal,
+        fill_price: Decimal,
+        exchange: str = "",
+    ) -> None:
         """Record a fill for this strategy.
 
         ``qty_delta`` is signed: positive = bought, negative = sold.
+        ``exchange`` distinguishes legs on the same symbol (e.g. spot vs perp).
         Updates avg_entry_price and realizes PnL for any position reduction.
         """
         if qty_delta == Decimal(0):
             return
 
-        pos = self._positions.setdefault(symbol, _SymbolPosition())
+        key = (symbol, exchange)
+        pos = self._positions.setdefault(key, _SymbolPosition())
         old_qty = pos.open_qty
         new_qty = old_qty + qty_delta
 
@@ -94,16 +104,19 @@ class PnLCalc:
         self._record_snapshot(symbol, pos, pos.last_unrealized)
 
     def update_market_price(self, symbol: str, price: Decimal) -> None:
-        """Recompute unrealized PnL using the latest market price.
+        """Recompute unrealized PnL for every leg of *symbol*.
 
         Call this on every bar event for each symbol the strategy trades.
+        All (symbol, exchange) legs with matching symbol are updated so that,
+        for a delta-neutral strategy, spot unrealized and perp unrealized are
+        both recomputed and sum to near zero.
         """
-        pos = self._positions.get(symbol)
-        if pos is None or pos.open_qty == Decimal(0):
-            return
-        unrealized = self._unrealized(pos, price)
-        pos.last_unrealized = unrealized
-        self._record_snapshot(symbol, pos, unrealized)
+        for (sym, _exch), pos in self._positions.items():
+            if sym != symbol or pos.open_qty == Decimal(0):
+                continue
+            unrealized = self._unrealized(pos, price)
+            pos.last_unrealized = unrealized
+            self._record_snapshot(symbol, pos, unrealized)
 
     # ------------------------------------------------------------------ reads
 

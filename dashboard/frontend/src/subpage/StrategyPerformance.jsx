@@ -3,7 +3,7 @@ import { createChart, LineSeries } from 'lightweight-charts'
 import { useTheme, th } from '../theme'
 
 const API_BASE = '/api/performance'
-const POLL_MS = 5000
+const POLL_MS = 30000
 
 function PnLChart({ data }) {
   const containerRef = useRef(null)
@@ -37,15 +37,15 @@ function PnLChart({ data }) {
     })
 
     const totalSeries = chart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 2, title: 'Total PnL' })
-    totalSeries.setData(data.total)
+    totalSeries.setData([...data.total].sort((a, b) => a.time - b.time))
 
     const realizedSeries = chart.addSeries(LineSeries, {
       color: '#7b8cde',
       lineWidth: 1,
       lineStyle: 2,
-      title: 'Realized',
+      title: 'Funding Income',
     })
-    realizedSeries.setData(data.realized)
+    realizedSeries.setData([...data.realized].sort((a, b) => a.time - b.time))
 
     chart.timeScale().fitContent()
 
@@ -127,7 +127,7 @@ function StrategyFills({ strategyId }) {
                     <span className={`text-[13px] font-medium leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
                       {isBuy ? 'BUY' : 'SELL'}
                     </span>
-                    <span className={`text-[11px] ${c.t3} leading-tight`}>fill</span>
+                    <span className={`text-[11px] ${c.t3} leading-tight`}>{f.exchange || 'fill'}</span>
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{Math.abs(qty)}</span>
@@ -145,7 +145,7 @@ function StrategyFills({ strategyId }) {
   )
 }
 
-export default function StrategyPerformance({ strategyId: lockedId }) {
+export default function StrategyPerformance({ strategyId: lockedId, displayName: lockedName }) {
   const isDark = useTheme()
   const c = th(isDark)
   const [strategies, setStrategies] = useState([])
@@ -207,8 +207,8 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
   const metrics = latest
     ? [
       { label: 'Total PnL', value: latest.total },
-      { label: 'Realized', value: latest.total_realized },
-      { label: 'Unrealized', value: latest.total_unrealized },
+      { label: 'Funding Income', value: latest.total_realized },
+      { label: 'MTM Net', value: latest.total_unrealized },
     ]
     : []
 
@@ -219,7 +219,7 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
       {/* Left: chart + metrics */}
       <div className="flex-1 min-w-0 flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <h3 className={`${c.t1} font-semibold text-lg`}>{selected ?? '—'}</h3>
+          <h3 className={`${c.t1} font-semibold text-lg`}>{lockedName ?? selected ?? '—'}</h3>
           {!lockedId && strategies.length > 0 && (
             <div className={`flex gap-1 ${c.togBg} rounded-md p-1`}>
               {strategies.map(s => (
@@ -266,7 +266,7 @@ export default function StrategyPerformance({ strategyId: lockedId }) {
               <span className="inline-block w-4 h-0.5 bg-[#26a69a]" /> Total PnL
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block w-4 h-0.5 bg-[#7b8cde] opacity-70" /> Realized
+              <span className="inline-block w-4 h-0.5 bg-[#7b8cde] opacity-70" /> Funding Income
             </span>
           </div>
         )}

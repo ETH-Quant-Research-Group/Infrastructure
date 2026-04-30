@@ -15,8 +15,8 @@ async def get_positions() -> dict:
 
 @router.get("/{symbol}")
 async def get_position(symbol: str) -> dict:
-    """Current broker position for a specific symbol."""
-    pos = positions.get(symbol)
-    if pos is None:
+    """All open positions for a specific symbol across all exchanges."""
+    matches = [p for key, p in positions.items() if key.endswith(f"_{symbol}")]
+    if not matches:
         raise HTTPException(status_code=404, detail=f"No open position for '{symbol}'")
-    return {"position": pos}
+    return {"positions": matches}

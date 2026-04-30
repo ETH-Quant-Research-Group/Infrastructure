@@ -116,6 +116,7 @@ def encode_fill(fill: FillConfirmation) -> bytes:
             "symbol": fill.symbol,
             "quantity": str(fill.quantity),
             "fill_price": str(fill.fill_price),
+            "exchange": fill.exchange,
         }
     ).encode()
 
@@ -128,6 +129,7 @@ def decode_fill(data: bytes) -> FillConfirmation:
         symbol=d["symbol"],
         quantity=Decimal(d["quantity"]),
         fill_price=Decimal(d["fill_price"]),
+        exchange=d.get("exchange", ""),
     )
 
 

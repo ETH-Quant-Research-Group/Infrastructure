@@ -33,13 +33,23 @@ function Home() {
   const isDark = useTheme()
   const c = th(isDark)
   const [strategyIds, setStrategyIds] = useState([])
+  const [displayNames, setDisplayNames] = useState({})
 
   useEffect(() => {
     async function fetchStrategies() {
       try {
-        const res = await fetch('/api/performance/pnl')
-        const data = await res.json()
-        setStrategyIds((data.pnl ?? []).map(s => s.strategy_id))
+        const [pnlRes, topoRes] = await Promise.all([
+          fetch('/api/performance/pnl'),
+          fetch('/api/topology/'),
+        ])
+        const pnlData = await pnlRes.json()
+        const topoData = await topoRes.json()
+        setStrategyIds((pnlData.pnl ?? []).map(s => s.strategy_id))
+        const names = {}
+        for (const s of topoData.strategies ?? []) {
+          if (s.display_name) names[s.name] = s.display_name
+        }
+        setDisplayNames(names)
       } catch { }
     }
     fetchStrategies()
@@ -64,7 +74,7 @@ function Home() {
           <div className="grid grid-cols-1 gap-6">
             {strategyIds.map(sid => (
               <div key={sid} className={`${c.card} border ${c.b1} rounded-xl p-5`}>
-                <StrategyPerformance strategyId={sid} />
+                <StrategyPerformance strategyId={sid} displayName={displayNames[sid]} />
               </div>
             ))}
           </div>
@@ -74,10 +84,236 @@ function Home() {
   )
 }
 
+function extractMarkets(topics) {
+  const seen = new Set()
+  const markets = []
+  for (const t of topics ?? []) {
+    const m = t.match(/^futures\.([A-Z]+?)(?:USDT|USDC|USD|BTC)\./)
+    if (m && !seen.has(m[1])) { seen.add(m[1]); markets.push(m[1]) }
+  }
+  return markets
+}
+
+function extractSymbols(topics) {
+  const seen = new Set()
+  const syms = []
+  for (const t of topics ?? []) {
+    const m = t.match(/^futures\.([A-Z]+)\./)
+    if (m && !seen.has(m[1])) { seen.add(m[1]); syms.push(m[1]) }
+  }
+  return syms
+}
+
+function useWebSocketFeed(handler) {
+  const handlerRef = useRef(handler)
+  handlerRef.current = handler
+  useEffect(() => {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws/live`)
+    ws.onmessage = e => { try { handlerRef.current(JSON.parse(e.data)) } catch {} }
+    return () => ws.close()
+  }, [])
+}
+
+function StrategyStatusBox({ topics, name }) {
+  const isDark = useTheme()
+  const c = th(isDark)
+  const symbols = extractSymbols(topics)
+  const [rates, setRates] = useState({})       // symbol → { rate, mark }
+  const [posPnl, setPosPnl] = useState({})     // symbol → { unrealized, realized }
+  const [openSymbols, setOpenSymbols] = useState(new Set())
+  const [updatedAt, setUpdatedAt] = useState(null)
+  const _ANN = 1095  // 8h settlement: 3/day × 365
+
+  useWebSocketFeed(msg => {
+    if (msg.subject?.startsWith('futures.') && msg.subject?.endsWith('.funding_rate')) {
+      const sym = msg.subject.split('.')[1]
+      if (!symbols.includes(sym)) return
+      const r = parseFloat(msg.data?.funding_rate ?? msg.data?.rate ?? 0)
+      const p = parseFloat(msg.data?.mark_price ?? 0)
+      setRates(prev => ({ ...prev, [sym]: { rate: r, mark: p } }))
+      setUpdatedAt(new Date())
+    }
+    if (msg.subject === 'positions.snapshot') {
+      const snap = Array.isArray(msg.data) ? msg.data : []
+      // Sum both perp and spot legs per symbol so uPnL shows the net
+      // delta-neutral unrealized (should be near zero while hedged).
+      const next = {}
+      for (const pos of snap) {
+        if (!symbols.includes(pos.symbol)) continue
+        const u = parseFloat(pos.unrealized_pnl ?? 0)
+        const r = parseFloat(pos.realized_pnl ?? 0)
+        if (next[pos.symbol]) {
+          next[pos.symbol].unrealized += u
+          next[pos.symbol].realized += r
+        } else {
+          next[pos.symbol] = { unrealized: u, realized: r }
+        }
+      }
+      setPosPnl(next)
+    }
+  })
+
+  useEffect(() => {
+    async function fetchPos() {
+      try {
+        const res = await fetch('/api/positions/')
+        const data = await res.json()
+        const open = new Set((data.positions ?? []).filter(p => p.status === 'open' && parseFloat(p.quantity) < 0).map(p => p.symbol))
+        setOpenSymbols(open)
+      } catch {}
+    }
+    fetchPos()
+    const id = setInterval(fetchPos, 10000)
+    return () => clearInterval(id)
+  }, [])
+
+  const mono = isDark ? 'text-zinc-300 font-mono text-xs' : 'text-zinc-700 font-mono text-xs'
+  const dim = isDark ? 'text-zinc-500 font-mono text-xs' : 'text-zinc-400 font-mono text-xs'
+
+  if (symbols.length === 0) return null
+
+  return (
+    <div className={`mt-4 rounded-lg border ${c.b1} ${isDark ? 'bg-zinc-900/60' : 'bg-zinc-50'} p-3 font-mono text-xs`}>
+      <div className={`${dim} mb-2 flex justify-between flex-wrap gap-2`}>
+        <span>{name}</span>
+        {updatedAt ? (
+          <div className="flex gap-4">
+            {[
+              { label: 'UTC', tz: 'UTC' },
+              { label: 'NY', tz: 'America/New_York' },
+              { label: 'LON', tz: 'Europe/London' },
+              { label: 'TYO', tz: 'Asia/Tokyo' },
+            ].map(({ label, tz }) => (
+              <span key={tz}>
+                <span className="opacity-50">{label} </span>
+                {updatedAt.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+              </span>
+            ))}
+          </div>
+        ) : <span>waiting…</span>}
+      </div>
+      <div className={`border-t ${c.b1} pt-2 flex flex-col gap-1`}>
+        {symbols.map(sym => {
+          const info = rates[sym]
+          const ann = info ? info.rate * _ANN * 100 : null
+          const inPos = openSymbols.has(sym)
+          const base = sym.replace(/USDT|USDC|USD$/, '')
+          const pnl = posPnl[sym]
+          const upnl = pnl?.unrealized ?? null
+          return (
+            <div key={sym} className="flex items-center gap-3 flex-wrap">
+              <span className={`w-12 ${mono}`}>{base}</span>
+              <span className={`w-24 ${mono}`}>{info ? `$${info.mark.toLocaleString('en-US', { maximumFractionDigits: 4 })}` : '—'}</span>
+              <span className={`w-28 font-semibold ${inPos ? 'text-[#26a69a]' : dim}`}>
+                {inPos ? 'SHORT + HEDGED' : 'FLAT'}
+              </span>
+              <span className={ann === null ? dim : ann > 0 ? 'text-[#26a69a] font-mono text-xs' : 'text-[#ef5350] font-mono text-xs'}>
+                {ann === null ? '—' : `${ann > 0 ? '+' : ''}${ann.toFixed(3)}% ann`}
+              </span>
+              {upnl !== null && (
+                <span className={`font-mono text-xs ${upnl > 0 ? 'text-[#26a69a]' : upnl < 0 ? 'text-[#ef5350]' : dim}`}>
+                  uPnL {upnl > 0 ? '+' : ''}${upnl.toFixed(2)}
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function Strategies() {
   const isDark = useTheme()
   const c = th(isDark)
-  return <div><h2 className={`text-xl font-medium ${c.t1}`}>Strategies</h2></div>
+  const [strategies, setStrategies] = useState([])
+  const [pnlMap, setPnlMap] = useState({})
+
+  useEffect(() => {
+    async function fetch_() {
+      try {
+        const [pnlRes, topoRes] = await Promise.all([
+          fetch('/api/performance/pnl'),
+          fetch('/api/topology/'),
+        ])
+        const pnlData = await pnlRes.json()
+        const topoData = await topoRes.json()
+        setStrategies(topoData.strategies ?? [])
+        const map = {}
+        for (const s of pnlData.pnl ?? []) map[s.strategy_id] = s
+        setPnlMap(map)
+      } catch { }
+    }
+    fetch_()
+    const id = setInterval(fetch_, 30000)
+    return () => clearInterval(id)
+  }, [])
+
+  const fmtPnlVal = v => {
+    const n = parseFloat(v)
+    if (isNaN(n)) return { text: '$0.00', color: 'text-zinc-400' }
+    const sign = n > 0 ? '+' : n < 0 ? '-' : ''
+    return {
+      text: `${sign}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      color: n > 0 ? 'text-[#26a69a]' : n < 0 ? 'text-[#ef5350]' : 'text-zinc-400',
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <h2 className={`${c.t1} font-bold font-notion-inter text-2xl md:text-[32px] leading-[1.1]`}>Strategies</h2>
+      {strategies.length === 0 ? (
+        <p className={`${c.t4} text-sm`}>No active strategies.</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4">
+          {strategies.map(s => {
+            const pnl = pnlMap[s.name] ?? {}
+            const active = s.guard_active !== false
+            const markets = extractMarkets(s.topics)
+            const total = fmtPnlVal(pnl.total)
+            const realized = fmtPnlVal(pnl.total_realized)
+            const unrealized = fmtPnlVal(pnl.total_unrealized)
+            return (
+              <div key={s.name} className={`${c.card} border ${c.b1} rounded-xl p-5 flex flex-col gap-4`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className={`${c.t1} font-bold text-lg leading-tight`}>{s.display_name ?? s.name}</p>
+                    <p className={`${c.t4} text-xs mt-0.5`}>Quantitative · Derivatives</p>
+                  </div>
+                  <span className={`shrink-0 text-xs font-semibold px-2.5 py-1 rounded-full ${active ? 'bg-emerald-900/40 text-emerald-400' : 'bg-red-900/40 text-red-400'}`}>
+                    {active ? 'ACTIVE' : 'HALTED'}
+                  </span>
+                </div>
+
+                {markets.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {markets.map(m => (
+                      <span key={m} className={`text-xs px-2 py-0.5 rounded ${c.innerCard} border ${c.b1} ${c.t3} font-mono`}>{m}</span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { label: 'Total PnL', v: total },
+                    { label: 'Realized', v: realized },
+                    { label: 'Unrealized', v: unrealized },
+                  ].map(({ label, v }) => (
+                    <div key={label} className={`${c.innerCard} border ${c.b1} rounded-lg p-2.5`}>
+                      <p className={`${c.t4} text-[10px] mb-1`}>{label}</p>
+                      <p className={`text-xs font-semibold font-mono ${v.color}`}>{v.text}</p>
+                    </div>
+                  ))}
+                </div>
+                <StrategyStatusBox topics={s.topics} name={s.display_name ?? s.name} />
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 const ASSET_CLASSES = [
@@ -172,14 +408,20 @@ function PriceLineChart({ bars, avgEntry }) {
     const c = th(isDark)
     const chart = createChart(el, { ...getChartOpts(c), width: el.clientWidth, height: 180 })
 
+    const dedup = (arr) => {
+      const seen = new Map()
+      arr.forEach(b => seen.set(b.time, b))
+      return [...seen.values()].sort((a, b) => a.time - b.time)
+    }
+    const sorted = dedup(bars)
     const priceSeries = chart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 2 })
-    priceSeries.setData(bars.map(b => ({ time: b.time, value: b.close })))
+    priceSeries.setData(sorted.map(b => ({ time: b.time, value: b.close })))
 
     const avgLine = chart.addSeries(LineSeries, {
       color: '#facc15', lineWidth: 1, lineStyle: 2,
       priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     })
-    avgLine.setData(bars.map(b => ({ time: b.time, value: parseFloat(avgEntry) })))
+    avgLine.setData(sorted.map(b => ({ time: b.time, value: parseFloat(avgEntry) })))
 
     chart.timeScale().fitContent()
     const observer = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }))
@@ -201,18 +443,24 @@ function CandleChart({ bars, avgEntry }) {
     const c = th(isDark)
     const chart = createChart(el, { ...getChartOpts(c), width: el.clientWidth, height: 180 })
 
+    const dedupBars = (arr) => {
+      const seen = new Map()
+      arr.forEach(b => seen.set(b.time, b))
+      return [...seen.values()].sort((a, b) => a.time - b.time)
+    }
+    const sortedBars = dedupBars(bars)
     const candles = chart.addSeries(CandlestickSeries, {
       upColor: '#26a69a', downColor: '#ef5350',
       borderUpColor: '#26a69a', borderDownColor: '#ef5350',
       wickUpColor: '#26a69a', wickDownColor: '#ef5350',
     })
-    candles.setData(bars)
+    candles.setData(sortedBars)
 
     const avgLine = chart.addSeries(LineSeries, {
       color: '#facc15', lineWidth: 1, lineStyle: 1,
       priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     })
-    avgLine.setData(bars.map(b => ({ time: b.time, value: parseFloat(avgEntry) })))
+    avgLine.setData(sortedBars.map(b => ({ time: b.time, value: parseFloat(avgEntry) })))
 
     chart.timeScale().fitContent()
     const observer = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }))
@@ -232,14 +480,20 @@ function PositionDetail({ position: detail }) {
   const upnl = fmtPnl(detail.unrealized_pnl)
   const rpnl = fmtPnl(detail.realized_pnl)
   const pct = pnlPct(detail)
-  const notional = Math.abs(qty) * parseFloat(detail.avg_entry_price)
   const { bars, interval } = useBars(detail.symbol)
   const hasData = bars.length >= 2
   const [chartMode, setChartMode] = useState('Line')
+  const avgEntry = parseFloat(detail.avg_entry_price)
+  const lastPrice = bars.length > 0 ? bars[bars.length - 1].close : 0
+  const effectivePrice = avgEntry > 0 ? avgEntry : lastPrice
+  const notional = Math.abs(qty) * effectivePrice
+  // For spot positions the broker returns avg_entry=0; use last bar price as reference
+  const hasAvgEntry = avgEntry > 0
+  const effectiveAvgEntry = hasAvgEntry ? detail.avg_entry_price : String(lastPrice)
 
   const stats = [
     { label: 'Quantity', value: Math.abs(qty).toLocaleString('en-US', { maximumFractionDigits: 6 }) },
-    { label: 'Notional', value: `$${notional.toLocaleString('en-US', { maximumFractionDigits: 2 })}` },
+    { label: 'Notional', value: notional > 0 ? `$${notional.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—' },
     { label: 'Realized PnL', value: rpnl.text, color: rpnl.color },
     { label: 'Unrealized PnL', value: upnl.text, color: upnl.color },
   ]
@@ -259,7 +513,7 @@ function PositionDetail({ position: detail }) {
               </span>
             )}
           </div>
-          <p className={`${c.t3} text-sm`}>{classifySymbol(detail.symbol)} · Avg entry ${fmtPrice(detail.avg_entry_price, 4)}</p>
+          <p className={`${c.t3} text-sm`}>{classifySymbol(detail.symbol)} · {detail.exchange || 'broker'} · {hasAvgEntry ? `Avg entry $${fmtPrice(detail.avg_entry_price, 4)}` : lastPrice > 0 ? `~$${fmtPrice(String(lastPrice), 4)} (spot)` : '—'}</p>
         </div>
 
         <div>
@@ -307,9 +561,9 @@ function PositionDetail({ position: detail }) {
             {!interval ? 'No bar data received for this symbol yet' : 'Waiting for first bar…'}
           </div>
         ) : chartMode === 'Line' ? (
-          <PriceLineChart bars={bars} avgEntry={detail.avg_entry_price} />
+          <PriceLineChart bars={bars} avgEntry={effectiveAvgEntry} />
         ) : (
-          <CandleChart bars={bars} avgEntry={detail.avg_entry_price} />
+          <CandleChart bars={bars} avgEntry={effectiveAvgEntry} />
         )}
       </div>
     </div>
@@ -335,7 +589,7 @@ function Assets() {
       }
     }
     fetchPositions()
-    const id = setInterval(fetchPositions, 5000)
+    const id = setInterval(fetchPositions, 30000)
     return () => clearInterval(id)
   }, [])
 
@@ -364,10 +618,11 @@ function Assets() {
             {filtered.map(p => {
               const pct = pnlPct(p)
               const { text: pnlText, color: pnlCls } = fmtPnl(p.unrealized_pnl)
+              const posKey = `${p.exchange}_${p.symbol}`
               return (
                 <a
-                  key={p.symbol}
-                  href={`#pos-${p.symbol}`}
+                  key={posKey}
+                  href={`#pos-${posKey}`}
                   className={`flex-shrink-0 flex flex-col gap-1.5 px-4 py-3 rounded-xl border text-left transition-colors no-underline w-44 ${p.status === 'closed' ? 'opacity-40' : ''} ${c.posCard}`}
                 >
                   <div className="flex items-center justify-between">
@@ -400,7 +655,7 @@ function Assets() {
       ) : (
         <div className="flex flex-col gap-4">
           {filtered.map(p => (
-            <div key={p.symbol} id={`pos-${p.symbol}`}>
+            <div key={`${p.exchange}_${p.symbol}`} id={`pos-${p.exchange}_${p.symbol}`}>
               <PositionDetail position={p} />
             </div>
           ))}
