@@ -61,7 +61,10 @@ async def start(nc: nats.aio.client.Client) -> None:
         ):
             record_bar(data, msg.subject)
         elif msg.subject.startswith("orders.placed.") and isinstance(data, dict):
-            record_order(data)
+            # Subject: orders.placed.{exchange}.{symbol}
+            _parts = msg.subject.split(".")
+            _exchange = _parts[2] if len(_parts) >= 4 else ""
+            record_order(data, exchange=_exchange)
         elif msg.subject.startswith("fills.") and isinstance(data, dict):
             record_fill(data)
         elif msg.subject.startswith("strategy.register.") and isinstance(data, dict):

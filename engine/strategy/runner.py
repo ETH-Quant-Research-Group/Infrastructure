@@ -94,20 +94,26 @@ class StrategyRunner:
 
     async def _emit(self, target: TargetPosition | None) -> None:
         if not self._guard.is_active:
-            # Flatten all open positions and stop emitting — keyed by
-            # (symbol, exchange) so perp and spot legs are flattened separately.
-            for (symbol, exchange), cum_qty in list(self._cum_position.items()):
-                if cum_qty != Decimal(0):
-                    await self._target_queue.put(
-                        TargetPosition(
-                            symbol=symbol,
-                            quantity=-cum_qty,
-                            price=self._last_price.get(symbol, Decimal(0)),
-                            strategy_id=self._strategy_id,
-                            exchange=exchange,
-                        )
-                    )
-            self._cum_position.clear()
+            # Guard tripped (cumulative loss exceeded max_loss).  HALT new
+            # emissions and require operator intervention.
+            #
+            # The previous implementation auto-flattened by emitting
+            # ``-cum_qty`` for every entry in ``_cum_position``.  That logic
+            # is unsafe because ``_cum_position`` tracks signals emitted by
+            # *this* runner instance since startup — NOT actual broker
+            # positions.  After ``restore_from_positions`` reattaches the
+            # strategy to existing broker positions, only the eventual EXIT
+            # signals get tracked here, and flattening with ``-cum_qty`` then
+            # OPENS positions in the wrong direction (observed 2026-05-03
+            # 13:40 UTC: a guard trip caused phantom perp-shorts and spot
+            # buys totalling ~$30K notional).
+            #
+            # Until the runner has access to broker truth, the only safe
+            # action on a guard trip is to stop and let a human decide.
+            if self._cum_position:
+                # Log once, then keep halting silently — the guard does not
+                # auto-reset, so this branch fires on every event after trip.
+                pass
             return
 
         if target is None or target.quantity == Decimal(0):

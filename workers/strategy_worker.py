@@ -18,6 +18,7 @@ import importlib
 import json
 import logging
 import os
+from datetime import UTC, datetime
 import pkgutil
 from typing import TYPE_CHECKING
 
@@ -82,13 +83,32 @@ async def _listen_fills(
 async def _publish_heartbeat_periodically(
     nc: nats.aio.client.Client,
     strategy_id: str,
+    strategy_instance=None,
     interval: float = 8.0,
 ) -> None:
-    """Publish a heartbeat so the dashboard can show the strategy as active."""
-    payload = json.dumps({"strategy_id": strategy_id, "status": "active"}).encode()
+    """Publish a heartbeat so the dashboard can show the strategy as active.
+
+    If the strategy exposes ``heartbeat_state()`` (returning a dict snapshot
+    of fill_state, perp/spot qty, holding period, etc. per symbol), the
+    snapshot is included in the payload so the dashboard can render rich
+    per-symbol state without subscribing to fills/positions separately.
+    """
     while True:
         await asyncio.sleep(interval)
-        await nc.publish(f"strategy.heartbeat.{strategy_id}", payload)
+        body: dict = {
+            "strategy_id": strategy_id,
+            "status": "active",
+            "ts": datetime.now(UTC).isoformat(),
+        }
+        if strategy_instance is not None and hasattr(strategy_instance, "heartbeat_state"):
+            try:
+                body["state"] = strategy_instance.heartbeat_state()
+            except Exception as exc:
+                log.debug("heartbeat_state() raised: %s", exc)
+        await nc.publish(
+            f"strategy.heartbeat.{strategy_id}",
+            json.dumps(body, default=str).encode(),
+        )
 
 
 async def _publish_registration_periodically(
@@ -124,15 +144,43 @@ async def _bridge_broker_pnl_to_strategy(
     """
     from decimal import Decimal
 
-    last_total: Decimal = Decimal(0)
+    # last_total is None until the first broker.pnl message arrives.  Until
+    # then we cannot compute a meaningful delta, so the guard is not fed.
+    # This prevents the strategy worker startup from synthesising a giant
+    # delta against a 0 baseline (especially harmful when the persisted
+    # baseline has been shifted, since the consolidator's first publish can
+    # be hundreds of dollars away from anything this worker has seen).
+    last_total: Decimal | None = None
+
+    # Sanity clamp: a real PnL change in 5 s on this fund cannot exceed
+    # max_loss * 2.  Any larger swing is treated as a publisher-restart
+    # artifact (e.g. consolidator reloaded with different baseline math),
+    # snaps the bridge baseline, and is NOT fed to the guard.  Without this
+    # clamp, the cascade observed 2026-05-03 13:40 UTC recurs: a synthetic
+    # ~$2.7K delta tripped the guard, and the runner's auto-flatten then
+    # opened phantom positions.
+    delta_clamp = guard.max_loss * Decimal(2)
 
     async def _cb(msg: nats.aio.msg.Msg) -> None:
         nonlocal last_total
         try:
             data = json.loads(msg.data)
             current_total = Decimal(str(data.get("total", "0") or "0"))
-            guard.record_pnl(current_total - last_total)
-            last_total = current_total
+            if last_total is None:
+                # First message after process start — establish baseline only.
+                last_total = current_total
+            else:
+                delta = current_total - last_total
+                if abs(delta) > delta_clamp:
+                    # Treat as publisher restart / baseline shift artifact.
+                    log.warning(
+                        "broker.pnl delta %.2f exceeds clamp %.2f — snapping baseline",
+                        float(delta), float(delta_clamp),
+                    )
+                    last_total = current_total
+                else:
+                    guard.record_pnl(delta)
+                    last_total = current_total
             await nc.publish(
                 f"pnl.{strategy_id}",
                 json.dumps({
@@ -258,7 +306,7 @@ async def main() -> None:
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
             tg.create_task(_bridge_broker_pnl_to_strategy(nc, strategy_id, guard))
-            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id))
+            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id, strategy_instance))
             tg.create_task(_publish_registration_periodically(nc, strategy_cls))
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")

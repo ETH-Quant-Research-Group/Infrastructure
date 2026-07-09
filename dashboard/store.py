@@ -1,9 +1,29 @@
-"""In-memory store for dashboard state populated by the NATS bridge."""
+"""In-memory store for dashboard state populated by the NATS bridge.
+
+When a :class:`~dashboard.persistence.DashboardDB` is attached via
+:func:`set_persistence`, every ``record_*`` call also writes to SQLite
+so data survives dashboard restarts.
+"""
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from dashboard.persistence import DashboardDB
+
+log = logging.getLogger(__name__)
+
+# Optional SQLite persistence — set via set_persistence() on startup.
+_db: DashboardDB | None = None
+
+
+def set_persistence(db: DashboardDB) -> None:
+    """Attach a SQLite database for durable storage."""
+    global _db
+    _db = db
 
 
 class OrderRecord(TypedDict):
@@ -13,6 +33,7 @@ class OrderRecord(TypedDict):
     quantity: str
     price: str
     reduce_only: bool
+    exchange: str
     placed_at: str  # ISO-8601
 
 
@@ -40,7 +61,7 @@ def unregister_strategy(name: str) -> None:
     registered_strategies.pop(name, None)
 
 
-def record_order(data: dict[str, object]) -> None:
+def record_order(data: dict[str, object], exchange: str = "") -> None:
     record: OrderRecord = {
         "symbol": str(data.get("symbol", "")),
         "side": str(data.get("side", "")),
@@ -48,11 +69,14 @@ def record_order(data: dict[str, object]) -> None:
         "quantity": str(data.get("quantity", "")),
         "price": str(data.get("price", "")),
         "reduce_only": bool(data.get("reduce_only", False)),
+        "exchange": exchange,
         "placed_at": datetime.now(UTC).isoformat(),
     }
     orders.append(record)
     if len(orders) > _MAX_ORDERS:
         del orders[: len(orders) - _MAX_ORDERS]
+    if _db is not None:
+        _db.insert_order(record)
 
 
 class PnLRecord(TypedDict):
@@ -225,6 +249,8 @@ def record_fill(data: dict) -> None:
     history.append(record)
     if len(history) > _MAX_FILLS:
         del history[: len(history) - _MAX_FILLS]
+    if _db is not None:
+        _db.insert_fill(record)
 
 
 class BrokerPnLRecord(TypedDict):
@@ -287,6 +313,8 @@ def record_broker_pnl(data: dict) -> None:
     broker_pnl_history.append(record)
     if len(broker_pnl_history) > _MAX_BROKER_PNL_HISTORY:
         del broker_pnl_history[: len(broker_pnl_history) - _MAX_BROKER_PNL_HISTORY]
+    if _db is not None:
+        _db.insert_broker_pnl(record)
 
 
 def record_pnl(data: dict) -> None:
@@ -303,3 +331,5 @@ def record_pnl(data: dict) -> None:
     history.append(record)
     if len(history) > _MAX_PNL_HISTORY:
         del history[: len(history) - _MAX_PNL_HISTORY]
+    if _db is not None:
+        _db.insert_strategy_pnl(record)

@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -249,14 +248,25 @@ class BybitLinearConnector:
     async def _stream_klines_8h(
         self, symbol: str,
     ) -> AsyncGenerator[RawKline, None]:
-        """Subscribe to 1h klines and aggregate into 8h bars live."""
+        """Subscribe to 1h klines and aggregate into 8h bars live.
+
+        Emits one 8h bar each time a 1h kline completes a settlement window
+        (00, 08, 16 UTC).  Detection uses bucket arithmetic on ``open_time_ms``
+        rather than parsing ``close_time_ms`` — Bybit's WebSocket kline
+        ``end`` field is the *inclusive* end of the period (e.g. 07:59:59.999
+        for the 07:00–08:00 1h kline), so ``close_dt.hour`` is always one
+        less than the boundary hour and ``minute`` is always 59.  The
+        previous ``close_dt.hour in (0, 8, 16) and close_dt.minute == 0``
+        check therefore never matched, and 8h bars never emitted (observed
+        2026-05-06: strategy ran 3 days with zero bars in the buffer).
+        """
         buffer: list[RawKline] = []
         async for k in self.stream_klines(symbol, KlineInterval.H1):
             buffer.append(k)
-            # Check if this 1h bar completes an 8h settlement boundary.
-            close_ms = k["close_time_ms"]
-            close_dt = datetime.fromtimestamp(close_ms / 1_000, tz=UTC)
-            if close_dt.hour in (0, 8, 16) and close_dt.minute == 0:
+            # A 1h kline closes an 8h settlement period when the next 1h
+            # boundary (open + 1h) lands on a multiple of 8h.  Equivalently:
+            # the kline that opened at 07:00, 15:00, or 23:00 UTC.
+            if (k["open_time_ms"] + 3_600_000) % _8H_MS == 0:
                 agg = _aggregate_to_8h(buffer)
                 if agg:
                     yield agg[-1]

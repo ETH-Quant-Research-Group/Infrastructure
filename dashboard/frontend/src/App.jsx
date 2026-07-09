@@ -115,6 +115,38 @@ function useWebSocketFeed(handler) {
   }, [])
 }
 
+function useNextFunding() {
+  // Bybit funding settlements: 00:00, 08:00, 16:00 UTC — every 8 hours.
+  const [remaining, setRemaining] = useState('')
+  useEffect(() => {
+    function calc() {
+      const now = new Date()
+      const h = now.getUTCHours()
+      const next = new Date(now)
+      if (h < 8) {
+        next.setUTCHours(8, 0, 0, 0)
+      } else if (h < 16) {
+        next.setUTCHours(16, 0, 0, 0)
+      } else {
+        // After 16:00 UTC → next settlement is 00:00 UTC tomorrow.
+        // Bump the date first, then zero the time, to avoid the
+        // setUTCHours(24) rollover-then-bump-again bug.
+        next.setUTCDate(now.getUTCDate() + 1)
+        next.setUTCHours(0, 0, 0, 0)
+      }
+      const diff = Math.max(0, Math.floor((next - now) / 1000))
+      const hrs = Math.floor(diff / 3600)
+      const mins = Math.floor((diff % 3600) / 60)
+      const secs = diff % 60
+      setRemaining(`${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`)
+    }
+    calc()
+    const id = setInterval(calc, 1000)
+    return () => clearInterval(id)
+  }, [])
+  return remaining
+}
+
 function StrategyStatusBox({ topics, name }) {
   const isDark = useTheme()
   const c = th(isDark)
@@ -124,6 +156,7 @@ function StrategyStatusBox({ topics, name }) {
   const [openSymbols, setOpenSymbols] = useState(new Set())
   const [updatedAt, setUpdatedAt] = useState(null)
   const _ANN = 1095  // 8h settlement: 3/day × 365
+  const countdown = useNextFunding()
 
   useWebSocketFeed(msg => {
     if (msg.subject?.startsWith('futures.') && msg.subject?.endsWith('.funding_rate')) {
@@ -178,7 +211,12 @@ function StrategyStatusBox({ topics, name }) {
       <div className={`${dim} mb-2 flex justify-between flex-wrap gap-2`}>
         <span>{name}</span>
         {updatedAt ? (
-          <div className="flex gap-4">
+          <div className="flex gap-4 items-center">
+            <span className="flex items-center gap-1.5">
+              <span className="opacity-50">Next funding</span>
+              <span className="text-[#facc15] font-semibold">{countdown}</span>
+            </span>
+            <span className="opacity-30">|</span>
             {[
               { label: 'UTC', tz: 'UTC' },
               { label: 'NY', tz: 'America/New_York' },

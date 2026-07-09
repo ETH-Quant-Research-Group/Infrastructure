@@ -27,7 +27,7 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
 import nats
@@ -35,7 +35,7 @@ import nats.aio.client
 import nats.aio.msg
 
 from config import NATS_URL
-from decimal import ROUND_HALF_UP
+from dashboard.persistence import DashboardDB
 from engine.data import codec
 from engine.order.consolidator import OrderConsolidator
 from execution.brokers.bybit import BybitBroker
@@ -49,6 +49,43 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_demo").lower()
+
+
+# ---------------------------------------------------------------------------
+# Instrument lot-size precision
+#
+# Bybit's order endpoints reject quantities with finer precision than the
+# instrument's lot size.  Quantizing with ROUND_DOWN guarantees we never
+# request more than we actually have on a Sell (which would 110030-error)
+# and never over-order on a Buy (residual is reconciled on the next cycle).
+#
+# Sourced from Bybit's instruments-info endpoint as of 2026-05-02.  Add new
+# symbols here when adding strategies.  ETHUSDT spot has 5-decimal precision
+# which the previous implementation truncated to 3.
+# ---------------------------------------------------------------------------
+
+_LOT_SIZE: dict[str, dict[str, Decimal]] = {
+    "bybit_demo": {
+        "ETHUSDT":  Decimal("0.01"),    # perp ETH
+        "LINKUSDT": Decimal("1"),       # perp LINK (whole contracts)
+    },
+    "bybit_spot": {
+        "ETHUSDT":  Decimal("0.00001"), # spot ETH
+        "LINKUSDT": Decimal("0.001"),   # spot LINK
+    },
+}
+
+
+def _quantize_to_lot(quantity: Decimal, exchange: str, symbol: str) -> Decimal:
+    """Round ``quantity`` DOWN to the instrument's lot size.
+
+    Falls back to a safe default per exchange family if the symbol is not
+    in the cache (1 contract for perps, 0.001 base coin for spot).
+    """
+    lot = _LOT_SIZE.get(exchange, {}).get(symbol)
+    if lot is None:
+        lot = Decimal("0.001") if exchange.endswith("spot") else Decimal("1")
+    return quantity.quantize(lot, rounding=ROUND_DOWN)
 
 
 # ---------------------------------------------------------------------------
@@ -86,12 +123,10 @@ def _order_factory(
     symbol: str, side: OrderSide, quantity: Decimal, _price: Decimal,
     exchange: str = "",
 ) -> Order:
-    # Spot orders use fractional quantities (e.g. 5.994 ETH).
-    # Perp contracts are sized in whole contracts — round to integer.
-    if exchange == "bybit_spot":
-        quantity = quantity.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
-    else:
-        quantity = quantity.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    # Quantize DOWN to the instrument's lot size.  ROUND_DOWN guarantees we
+    # never order more than we have on a Sell (avoids 110030 insufficient
+    # balance) and never over-buy on entry (residual is reconciled next cycle).
+    quantity = _quantize_to_lot(quantity, exchange, symbol)
     return PerpOrder(
         symbol=symbol,
         side=side,
@@ -135,118 +170,209 @@ async def _publish_placed_orders(
         )
 
 
-async def _publish_broker_pnl(
+async def _publish_state(
     nc: nats.aio.client.Client,
-    brokers: dict[str, BaseBroker],
+    consolidator: OrderConsolidator,
     interval: float = 5.0,
 ) -> None:
-    """Publish PnL snapshots for every broker.
+    """Single source of truth for positions + broker PnL.
+
+    Fetches ``list_positions()`` ONCE per cycle for each broker, then derives
+    both ``positions.snapshot`` and ``broker.pnl[.exchange]`` from the same
+    data.  This guarantees:
+
+      sum(positions.snapshot[s].unrealized_pnl) == broker.pnl.total_unrealized
+
+    so the per-symbol display on the strategy page always matches the
+    fund-level PnL exactly (no timing drift between independent loops).
 
     Delta-neutral accounting (perp short + spot long hedge):
 
-      perp realized   = USDT wallet-balance delta since session start.
-                        This is the only true cash flow: funding payments
-                        credit/debit USDT every 8 h and fees are charged on
-                        each trade.  It NEVER fluctuates with price.
+      perp realized   = cumRealisedPnl delta since persisted baseline
+      perp unrealized = sum(pos.unrealized_pnl) from perp positions
+      spot realized   = 0
+      spot unrealized = sum((current_price - perp_entry) * spot_qty)
+                        STATELESS — buying spot does NOT create PnL.
 
-      perp unrealized = totalUnrealisedPnl (mark-to-market on open perp).
-                        Negative for a short when price rises, positive when
-                        price falls.
-
-      spot realized   = 0  (no cash is received until coins are actually sold)
-
-      spot unrealized = spotCoinEquity delta since session start.
-                        Positive when price rises (mirrors perp unrealized sign).
-
-    Aggregate:
-      total_realized   ≈ accumulated funding income   (stacks up every 8 h, never
-                          reverts unless negative funding)
-      total_unrealized ≈ 0 for a well-hedged position (perp and spot legs cancel)
-      total            = realized + unrealized
+    Baseline persistence:
+      The realized-PnL baseline is loaded from SQLite (``kv`` table, key
+      ``baseline_realized:{exchange}``) at startup and only written once
+      per exchange — at the very first start.  This means REALIZED on the
+      dashboard reflects true since-strategy-inception cumulative PnL and
+      never resets when this worker restarts.  To manually adjust the
+      baseline (e.g. seed a known historical loss), update the SQLite kv
+      row directly.
     """
+    # Load (or initialise) per-exchange baselines from SQLite once.  The DB
+    # connection lives only for the lifetime of this coroutine; we reopen
+    # to write each new baseline so concurrent dashboard reads stay valid.
+    db = DashboardDB()
     _baselines: dict[str, Decimal] = {}
+    brokers = consolidator.brokers
 
     while True:
         await asyncio.sleep(interval)
         ts = datetime.now(UTC).isoformat()
+
+        # ---- Step 1: fetch positions once per broker ----
+        positions_by_broker: dict[str, list[Any]] = {}
+        wallets: dict[str, dict[str, Any]] = {}
+        for exchange, broker in brokers.items():
+            try:
+                if hasattr(broker, "list_positions"):
+                    positions_by_broker[exchange] = await broker.list_positions()
+                else:
+                    symbols = consolidator.tracked_symbols_for(exchange)
+                    positions_by_broker[exchange] = [
+                        p for s in symbols
+                        if (p := await broker.position(s)) is not None
+                    ]
+            except Exception as exc:
+                log.warning("list_positions failed for %s: %s", exchange, exc)
+                positions_by_broker[exchange] = []
+
+            if hasattr(broker, "wallet_balance"):
+                try:
+                    wallets[exchange] = await broker.wallet_balance() or {}
+                except Exception as exc:
+                    log.warning("wallet_balance failed for %s: %s", exchange, exc)
+                    wallets[exchange] = {}
+
+        # ---- Step 2: build positions.snapshot list ----
+        snapshot: list[dict[str, Any]] = []
+        for exchange, positions in positions_by_broker.items():
+            for pos in positions:
+                snapshot.append({
+                    "symbol": pos.symbol,
+                    "exchange": exchange,
+                    "quantity": str(pos.quantity),
+                    "avg_entry_price": str(pos.avg_entry_price),
+                    "unrealized_pnl": str(pos.unrealized_pnl),
+                    "realized_pnl": str(pos.realized_pnl),
+                })
+
+        # ---- Step 3: override spot unrealized using perp entry prices ----
+        # Bybit spot API has no native uPnL — derive from perp entry as reference.
+        perp_entries: dict[str, Decimal] = {}
+        for p in snapshot:
+            if p["exchange"] == "bybit_demo":
+                entry = Decimal(p["avg_entry_price"])
+                if entry > Decimal(0):
+                    perp_entries[p["symbol"]] = entry
+
+        for p in snapshot:
+            if p["exchange"] == "bybit_spot" and p["symbol"] in perp_entries:
+                spot_qty = Decimal(p["quantity"])
+                current_price = Decimal(p["avg_entry_price"])
+                perp_entry = perp_entries[p["symbol"]]
+                p["unrealized_pnl"] = str((current_price - perp_entry) * spot_qty)
+
+        # ---- Step 4: publish positions.snapshot ----
+        await nc.publish("positions.snapshot", json.dumps(snapshot).encode())
+        log.debug("published positions snapshot: %d positions", len(snapshot))
+
+        # ---- Step 5: derive broker PnL from the SAME snapshot ----
+        # Crucial: by reading from `snapshot` (not re-querying), we guarantee
+        # broker.pnl.total_unrealized == sum(positions.snapshot.uPnL).
         total_realized = Decimal(0)
         total_unrealized = Decimal(0)
 
         for exchange, broker in brokers.items():
             payload: dict[str, Any] | None = None
+            wb = wallets.get(exchange, {})
+            broker_positions = [p for p in snapshot if p["exchange"] == exchange]
 
-            if hasattr(broker, "wallet_balance"):
-                wb = await broker.wallet_balance()
-                if not wb:
-                    continue
+            if "spotCoinEquity" in wb:
+                # ---- Spot leg ----
+                equity = Decimal(str(wb.get("spotCoinEquity", "0") or "0"))
+                spot_unrealized = sum(
+                    (Decimal(p["unrealized_pnl"]) for p in broker_positions),
+                    Decimal(0),
+                )
+                total_unrealized += spot_unrealized
+                payload = {
+                    "exchange": exchange,
+                    "total_realized": "0",
+                    "total_unrealized": str(spot_unrealized),
+                    "total": str(spot_unrealized),
+                    "total_equity": str(equity),
+                    "timestamp": ts,
+                }
 
-                if "spotCoinEquity" in wb:
-                    # ---- Spot leg ----
-                    # The change in coin USD-value is unrealized (not cash).
-                    # It offsets the perp unrealized so the fund net ≈ 0.
-                    equity = Decimal(str(wb.get("spotCoinEquity", "0") or "0"))
-                    if exchange not in _baselines:
-                        _baselines[exchange] = equity
-                    spot_unrealized = equity - _baselines[exchange]
+            elif wb:
+                # ---- Perp leg ----
+                total_equity = Decimal(str(wb.get("totalEquity", "0") or "0"))
+                wallet = Decimal(str(wb.get("totalWalletBalance", "0") or "0"))
+                available = str(wb.get("totalAvailableBalance", "") or "")
+                coins = wb.get("coin", [])
 
-                    total_unrealized += spot_unrealized
-                    payload = {
-                        "exchange": exchange,
-                        "total_realized": "0",
-                        "total_unrealized": str(spot_unrealized),
-                        "total": str(spot_unrealized),
-                        "total_equity": str(equity),
-                        "timestamp": ts,
-                    }
-
-                else:
-                    # ---- Perp leg ----
-                    total_equity = Decimal(str(wb.get("totalEquity", "0") or "0"))
-                    unrealized = Decimal(str(wb.get("totalUnrealisedPnl", "0") or "0"))
-                    wallet = Decimal(str(wb.get("totalWalletBalance", "0") or "0"))
-                    available = str(wb.get("totalAvailableBalance", "") or "")
-                    coins = wb.get("coin", [])
-
-                    # Realized PnL = delta of cumRealisedPnl since startup.
-                    # Baselining means historical losses from previous sessions
-                    # are excluded — only new funding payments and fees count.
-                    positions = await broker.list_positions()
-                    cum_realized = sum(
-                        (p.realized_pnl for p in positions), Decimal(0)
-                    )
-                    realized_key = f"{exchange}_cum_realized"
-                    if realized_key not in _baselines:
+                # Use uPnL values from the snapshot — same numbers shown on website.
+                pnl_unrealized = sum(
+                    (Decimal(p["unrealized_pnl"]) for p in broker_positions),
+                    Decimal(0),
+                )
+                # Lifetime cumulative realized PnL: read from the wallet's
+                # USDT cumRealisedPnl field, NOT from the sum of currently-open
+                # positions' realized_pnl.  The latter goes to 0 the moment a
+                # position closes (the position vanishes from list_positions),
+                # which after a baseline shift produces phantom +REALIZED jumps
+                # equal to abs(baseline) every time we exit.
+                # cumRealisedPnl in the wallet response includes every closed
+                # trade since account inception and never resets.
+                cum_realized = Decimal(0)
+                for c in (coins if isinstance(coins, list) else []):
+                    if c.get("coin") == "USDT":
+                        cum_realized = Decimal(str(c.get("cumRealisedPnl", "0") or "0"))
+                        break
+                realized_key = f"{exchange}_cum_realized"
+                if realized_key not in _baselines:
+                    # First touch this process lifetime: try SQLite first; if
+                    # nothing persisted yet, this is the truly-first start and
+                    # we capture today's cum_realized as the inception
+                    # baseline.  After that, never write again — the same
+                    # baseline persists across all future restarts.
+                    db_key = f"baseline_realized:{exchange}"
+                    persisted = db.get_kv(db_key)
+                    if persisted is not None:
+                        _baselines[realized_key] = Decimal(persisted)
+                        log.info(
+                            "Loaded persisted baseline for %s: %s (since-inception REALIZED preserved)",
+                            exchange, persisted,
+                        )
+                    else:
                         _baselines[realized_key] = cum_realized
-                    pnl_realized = cum_realized - _baselines[realized_key]
+                        db.set_kv(db_key, str(cum_realized))
+                        log.info(
+                            "Set initial baseline for %s: %s (first start ever)",
+                            exchange, cum_realized,
+                        )
+                pnl_realized = cum_realized - _baselines[realized_key]
+                pnl_total = pnl_realized + pnl_unrealized
 
-                    # Perp MTM: negative for short when price rises.
-                    pnl_unrealized = unrealized
-                    pnl_total = pnl_realized + pnl_unrealized
+                # AUM = totalEquity minus spot-coin values (tracked separately)
+                spot_usd = Decimal(str(sum(
+                    float(c.get("usdValue", 0) or 0)
+                    for c in (coins if isinstance(coins, list) else [])
+                    if c.get("coin") not in ("USDT", "USDC")
+                )))
+                perp_equity = total_equity - spot_usd
 
-                    # AUM = totalEquity minus spot-coin values (spot tracked separately)
-                    spot_usd = Decimal(str(sum(
-                        float(c.get("usdValue", 0) or 0)
-                        for c in (coins if isinstance(coins, list) else [])
-                        if c.get("coin") not in ("USDT", "USDC")
-                    )))
-                    perp_equity = total_equity - spot_usd
+                total_realized += pnl_realized
+                total_unrealized += pnl_unrealized
 
-                    total_realized += pnl_realized
-                    total_unrealized += pnl_unrealized
-
-                    payload = {
-                        "exchange": exchange,
-                        "total_realized": str(pnl_realized),
-                        "total_unrealized": str(pnl_unrealized),
-                        "total": str(pnl_total),
-                        "total_equity": str(perp_equity),
-                        "total_wallet_balance": str(wallet),
-                        "available_balance": available,
-                        "timestamp": ts,
-                    }
+                payload = {
+                    "exchange": exchange,
+                    "total_realized": str(pnl_realized),
+                    "total_unrealized": str(pnl_unrealized),
+                    "total": str(pnl_total),
+                    "total_equity": str(perp_equity),
+                    "total_wallet_balance": str(wallet),
+                    "available_balance": available,
+                    "timestamp": ts,
+                }
 
             elif hasattr(broker, "total_realized_pnl") and hasattr(broker, "total_unrealized_pnl"):
-                # Fallback for brokers without wallet_balance (e.g. paper broker)
+                # Fallback for paper broker
                 realized = broker.total_realized_pnl
                 unrealized = broker.total_unrealized_pnl
                 total_realized += realized
@@ -265,69 +391,14 @@ async def _publish_broker_pnl(
         # Aggregate across all brokers
         await nc.publish(
             "broker.pnl",
-            json.dumps(
-                {
-                    "exchange": "all",
-                    "total_realized": str(total_realized),
-                    "total_unrealized": str(total_unrealized),
-                    "total": str(total_realized + total_unrealized),
-                    "timestamp": ts,
-                }
-            ).encode(),
+            json.dumps({
+                "exchange": "all",
+                "total_realized": str(total_realized),
+                "total_unrealized": str(total_unrealized),
+                "total": str(total_realized + total_unrealized),
+                "timestamp": ts,
+            }).encode(),
         )
-
-
-async def _publish_positions(
-    nc: nats.aio.client.Client,
-    consolidator: OrderConsolidator,
-    interval: float = 5.0,
-) -> None:
-    """Query every broker for its open positions and publish a unified snapshot."""
-    while True:
-        await asyncio.sleep(interval)
-        snapshot: list[dict[str, Any]] = []
-        for exchange, broker in consolidator.brokers.items():
-            # Prefer list_positions() which returns all open positions without
-            # needing in-memory tracking (survives consolidator restarts).
-            if hasattr(broker, "list_positions"):
-                positions = await broker.list_positions()
-            else:
-                symbols = consolidator.tracked_symbols_for(exchange)
-                positions = [p for s in symbols if (p := await broker.position(s)) is not None]
-            for pos in positions:
-                snapshot.append(
-                    {
-                        "symbol": pos.symbol,
-                        "exchange": exchange,
-                        "quantity": str(pos.quantity),
-                        "avg_entry_price": str(pos.avg_entry_price),
-                        "unrealized_pnl": str(pos.unrealized_pnl),
-                        "realized_pnl": str(pos.realized_pnl),
-                    }
-                )
-        # Cross-reference perp avg entry prices to compute spot unrealized PnL.
-        # Bybit spot API has no concept of unrealized PnL — we derive it using
-        # the corresponding perp leg's entry price as the reference (both legs
-        # were entered simultaneously at approximately the same price).
-        # spot_unrealized = (current_price - perp_entry) * spot_qty
-        perp_entries: dict[str, Decimal] = {}
-        for p in snapshot:
-            if p["exchange"] == "bybit_demo":
-                entry = Decimal(p["avg_entry_price"])
-                if entry > Decimal(0):
-                    perp_entries[p["symbol"]] = entry
-
-        for p in snapshot:
-            if p["exchange"] == "bybit_spot" and p["symbol"] in perp_entries:
-                spot_qty = Decimal(p["quantity"])
-                # avg_entry_price for spot = current price (usdValue/qty from wallet)
-                current_price = Decimal(p["avg_entry_price"])
-                perp_entry = perp_entries[p["symbol"]]
-                p["unrealized_pnl"] = str((current_price - perp_entry) * spot_qty)
-
-        payload = json.dumps(snapshot).encode()
-        await nc.publish("positions.snapshot", payload)
-        log.debug("published positions snapshot: %d positions", len(snapshot))
 
 
 async def _publish_fills(
@@ -381,6 +452,7 @@ async def _replay_recent_orders(
                 "quantity": f.get("quantity", "0"),
                 "price": f.get("price", "0"),
                 "reduce_only": f.get("reduce_only", False),
+                "exchange": exchange,
             }).encode()
             symbol = f.get("symbol", "unknown")
             await nc.publish(f"orders.placed.{exchange}.{symbol}", payload)
@@ -464,8 +536,7 @@ async def main() -> None:
             tg.create_task(consolidator.run())
             tg.create_task(_publish_placed_orders(nc, placed_queue))
             tg.create_task(_publish_fills(nc, fills_queue))
-            tg.create_task(_publish_positions(nc, consolidator, interval=3.0))
-            tg.create_task(_publish_broker_pnl(nc, brokers, interval=3.0))
+            tg.create_task(_publish_state(nc, consolidator, interval=1.0))
             tg.create_task(_feed_market_prices(nc, brokers))
             tg.create_task(_serve_replay_requests(nc, brokers))
     finally:

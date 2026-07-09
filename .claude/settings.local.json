@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls *)",
+      "Bash(python3 -m py_compile dashboard/api/performance.py)",
+      "Bash(python3 -m py_compile workers/strategy_worker.py)",
+      "Bash(npx --no eslint src/subpage/StrategyPerformance.jsx src/subpage/Orders.jsx src/utils/format.js src/App.jsx)",
+      "Bash(node_modules/.bin/vite build *)",
+      "Bash(python3 -m py_compile /Users/bogdanosadczuk/Desktop/Infrastructure-2/dashboard/api/performance.py)",
+      "Bash(python3 -m py_compile workers/consolidator_worker.py)",
+      "Bash(python3 -m py_compile /Users/bogdanosadczuk/Desktop/Infrastructure-2/engine/strategy/runner.py /Users/bogdanosadczuk/Desktop/Infrastructure-2/workers/strategy_worker.py)",
+      "WebSearch",
+      "WebFetch(domain:docs.alpaca.markets)",
+      "WebFetch(domain:hyperliquid.gitbook.io)"
+    ]
+  }
+}

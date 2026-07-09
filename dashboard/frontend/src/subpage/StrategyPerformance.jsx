@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createChart, LineSeries } from 'lightweight-charts'
 import { useTheme, th } from '../theme'
+import { fmtUTC } from '../utils/format'
 
 const API_BASE = '/api/performance'
 const POLL_MS = 30000
@@ -121,7 +122,7 @@ function StrategyFills({ strategyId }) {
                 >
                   <div className="flex flex-col gap-1">
                     <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{f.symbol}</span>
-                    <span className={`text-[11px] ${c.t4} leading-tight`}>{new Date(f.filled_at).toLocaleTimeString()}</span>
+                    <span className={`text-[11px] font-mono ${c.t4} leading-tight tabular-nums`}>{fmtUTC(f.filled_at)}</span>
                   </div>
                   <div className="flex flex-col items-end gap-1 pr-3">
                     <span className={`text-[13px] font-medium leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -152,9 +153,37 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
   const [selected, setSelected] = useState(lockedId ?? null)
   const [latest, setLatest] = useState(null)
   const [chartData, setChartData] = useState({ total: [], realized: [] })
+  const [riskMetrics, setRiskMetrics] = useState(null)
+  const [fundingFees, setFundingFees] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const everLoadedRef = useRef(false)
+
+  useEffect(() => {
+    async function fetchMetrics() {
+      try {
+        const res = await fetch(`${API_BASE}/metrics`)
+        if (res.ok) setRiskMetrics(await res.json())
+      } catch {}
+    }
+    fetchMetrics()
+    const id = setInterval(fetchMetrics, POLL_MS)
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    // Funding-vs-fees is cached server-side for 1h; poll every 5 min so a
+    // fresh result appears soon after the cache expires.
+    async function fetchFundingFees() {
+      try {
+        const res = await fetch(`${API_BASE}/funding-vs-fees?symbols=ETHUSDT,LINKUSDT&lookback_hours=720`)
+        if (res.ok) setFundingFees(await res.json())
+      } catch {}
+    }
+    fetchFundingFees()
+    const id = setInterval(fetchFundingFees, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     if (lockedId) return
@@ -243,6 +272,92 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
                 <p className={`text-base font-semibold font-mono ${pnlColor(m.value)}`}>{fmt(m.value)}</p>
               </div>
             ))}
+          </div>
+        )}
+
+        {riskMetrics && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
+              <p className={`${c.t3} text-xs mb-1`}>Total Return</p>
+              <p className={`text-base font-semibold font-mono ${pnlColor(riskMetrics.total_return ?? 0)}`}>
+                {riskMetrics.total_return !== null && riskMetrics.total_return !== undefined
+                  ? `${(riskMetrics.total_return * 100).toFixed(3)}%`
+                  : '—'}
+              </p>
+            </div>
+            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
+              <p className={`${c.t3} text-xs mb-1`}>Sharpe Ratio</p>
+              <p className={`text-base font-semibold font-mono ${c.t1}`}>
+                {riskMetrics.sharpe_ratio !== null && riskMetrics.sharpe_ratio !== undefined
+                  ? riskMetrics.sharpe_ratio.toFixed(2)
+                  : '—'}
+              </p>
+            </div>
+            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
+              <p className={`${c.t3} text-xs mb-1`}>Max Drawdown</p>
+              <p className={`text-base font-semibold font-mono ${riskMetrics.max_drawdown ? 'text-[#ef5350]' : c.t1}`}>
+                {riskMetrics.max_drawdown !== null && riskMetrics.max_drawdown !== undefined
+                  ? `${(riskMetrics.max_drawdown * 100).toFixed(3)}%`
+                  : '—'}
+              </p>
+            </div>
+            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
+              <p className={`${c.t3} text-xs mb-1`}>Win Rate</p>
+              <p className={`text-base font-semibold font-mono ${c.t1}`}>
+                {riskMetrics.win_rate !== null && riskMetrics.win_rate !== undefined
+                  ? `${(riskMetrics.win_rate * 100).toFixed(1)}%`
+                  : '—'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {fundingFees && (
+          <div className={`${c.innerCard} rounded-lg p-4 border ${c.b1}`}>
+            <div className="flex items-baseline justify-between mb-3">
+              <p className={`${c.t1} text-sm font-semibold`}>Funding income vs trading fees</p>
+              <p className={`${c.t5} text-[10px] font-mono`}>
+                last {fundingFees.lookback_hours}h · cached {fundingFees.cache_age_s ?? 0}s
+              </p>
+            </div>
+            <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
+              <div>
+                <p className={`${c.t3} text-xs mb-1`}>Funding collected</p>
+                <p className={`text-base font-semibold font-mono ${pnlColor(fundingFees.totals.funding)}`}>
+                  {fmt(fundingFees.totals.funding)}
+                </p>
+              </div>
+              <div>
+                <p className={`${c.t3} text-xs mb-1`}>Fees paid</p>
+                <p className={`text-base font-semibold font-mono ${pnlColor(fundingFees.totals.fees)}`}>
+                  {fmt(fundingFees.totals.fees)}
+                </p>
+              </div>
+              <div>
+                <p className={`${c.t3} text-xs mb-1`}>Net</p>
+                <p className={`text-base font-semibold font-mono ${pnlColor(fundingFees.totals.net)}`}>
+                  {fmt(fundingFees.totals.net)}
+                </p>
+              </div>
+              <div className="hidden md:block">
+                <p className={`${c.t3} text-xs mb-1`}>Pulled at</p>
+                <p className={`text-[11px] font-mono ${c.t4} tabular-nums`}>{fmtUTC(fundingFees.fetched_at)}</p>
+              </div>
+            </div>
+            {fundingFees.per_symbol && Object.keys(fundingFees.per_symbol).length > 0 && (
+              <div className={`mt-3 pt-3 border-t ${c.b1} grid grid-cols-1 md:grid-cols-2 gap-2`}>
+                {Object.entries(fundingFees.per_symbol).map(([sym, v]) => (
+                  <div key={sym} className="flex items-baseline justify-between text-xs">
+                    <span className={`${c.t2} font-medium`}>{sym}</span>
+                    <span className={`font-mono tabular-nums ${c.t4}`}>
+                      funding <span className={pnlColor(v.funding)}>{fmt(v.funding)}</span>
+                      {' · '}fees <span className={pnlColor(v.fees)}>{fmt(v.fees)}</span>
+                      {' · '}net <span className={pnlColor(v.net)}>{fmt(v.net)}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
