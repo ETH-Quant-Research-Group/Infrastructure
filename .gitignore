@@ -208,6 +208,8 @@ __marimo__/
 
 
 .DS_Store
+.claude/
+*.code-workspace
 
 tests/notebooks
 
