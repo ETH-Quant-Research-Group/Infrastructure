@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from dashboard.api import market, orders, performance, positions, strategies, topology
 from dashboard.ws.manager import router as ws_router
@@ -19,4 +18,17 @@ app.include_router(topology.router, prefix="/api/topology", tags=["topology"])
 app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 
 _FRONTEND = Path(__file__).parent / "frontend" / "dist"
-app.mount("/", StaticFiles(directory=_FRONTEND, html=True), name="frontend")
+if _FRONTEND.exists():
+    from starlette.responses import FileResponse
+    from starlette.staticfiles import StaticFiles as _SF
+
+    # Mount static assets (JS/CSS/images) under /assets so they are served
+    # directly without the html=True catch-all intercepting WebSocket upgrades.
+    app.mount("/assets", _SF(directory=_FRONTEND / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404)
+        return FileResponse(_FRONTEND / "index.html")

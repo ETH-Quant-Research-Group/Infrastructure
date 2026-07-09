@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -176,14 +177,24 @@ class BinanceFuturesConnector:
         """Yield a :class:`RawKline` for each *closed* futures bar over WebSocket.
 
         Only emits once Binance marks the bar closed (``x == True``).
+        Reconnects automatically on disconnect.
         """
+        import logging
+        log = logging.getLogger(__name__)
         url = f"{self._WS_BASE}/{symbol.lower()}@kline_{interval.value}"
-        async with websockets.connect(url) as ws:  # type: ignore[attr-defined]
-            async for message in ws:
-                data: dict[str, Any] = json.loads(message)
-                k = data["k"]
-                if k["x"]:  # x == True → bar is closed
-                    yield _parse_ws_kline(k)
+        while True:
+            try:
+                async with websockets.connect(url) as ws:  # type: ignore[attr-defined]
+                    async for message in ws:
+                        data: dict[str, Any] = json.loads(message)
+                        k = data["k"]
+                        if k["x"]:  # x == True → bar is closed
+                            yield _parse_ws_kline(k)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("stream_klines %s disconnected: %s — reconnecting in 5s", url, exc)
+                await asyncio.sleep(5)
 
     async def stream_mark_price(
         self,
@@ -194,31 +205,46 @@ class BinanceFuturesConnector:
         """Yield live mark-price and funding-rate updates over WebSocket.
 
         Binance pushes updates every *update_speed* seconds (1 or 3).
-        Each message includes the current mark price, index price, live
-        funding rate, and the timestamp of the next scheduled settlement.
-
-        Args:
-            symbol: e.g. ``"BTCUSDT"``
-            update_speed: ``1`` for 1-second cadence, ``3`` (default) for
-                the standard 3-second cadence.
+        Reconnects automatically on disconnect.
         """
+        import logging
+        log = logging.getLogger(__name__)
         suffix = "" if update_speed == 3 else "@1s"
         url = f"{self._WS_BASE}/{symbol.lower()}@markPrice{suffix}"
-        async with websockets.connect(url) as ws:  # type: ignore[attr-defined]
-            async for message in ws:
-                data: dict[str, Any] = json.loads(message)
-                yield _parse_ws_mark_price(data)
+        while True:
+            try:
+                async with websockets.connect(url) as ws:  # type: ignore[attr-defined]
+                    async for message in ws:
+                        data: dict[str, Any] = json.loads(message)
+                        yield _parse_ws_mark_price(data)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("stream_mark_price %s disconnected: %s — reconnecting in 5s", url, exc)
+                await asyncio.sleep(5)
 
     async def stream_trades(
         self,
         symbol: str,
     ) -> AsyncGenerator[RawTrade, None]:
-        """Yield a :class:`RawTrade` for every futures trade over WebSocket."""
+        """Yield a :class:`RawTrade` for every futures trade over WebSocket.
+
+        Reconnects automatically on disconnect.
+        """
+        import logging
+        log = logging.getLogger(__name__)
         url = f"{self._WS_BASE}/{symbol.lower()}@trade"
-        async with websockets.connect(url) as ws:  # type: ignore[attr-defined]
-            async for message in ws:
-                data: dict[str, Any] = json.loads(message)
-                yield _parse_ws_trade(data)
+        while True:
+            try:
+                async with websockets.connect(url) as ws:  # type: ignore[attr-defined]
+                    async for message in ws:
+                        data: dict[str, Any] = json.loads(message)
+                        yield _parse_ws_trade(data)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("stream_trades %s disconnected: %s — reconnecting in 5s", url, exc)
+                await asyncio.sleep(5)
 
     # ----------------------------------------------------------------- lifecycle
 

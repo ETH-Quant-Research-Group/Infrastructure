@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createChart, LineSeries } from 'lightweight-charts'
 import { useTheme, th } from '../theme'
 
-const POLL_MS = 5000
+const POLL_MS = 30000
 
 function fmt(v, { sign = true, decimals = 2 } = {}) {
   const n = parseFloat(v)
@@ -58,11 +58,11 @@ function PnLChart({ strategySeries, brokerSeries }) {
 
     if (hasStrategy) {
       const s = chart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 2, title: 'Strategy PnL' })
-      s.setData(strategySeries)
+      s.setData([...strategySeries].sort((a, b) => a.time - b.time))
     }
     if (hasBroker) {
       const s = chart.addSeries(LineSeries, { color: '#7b8cde', lineWidth: 1.5, lineStyle: 2, title: 'Broker PnL' })
-      s.setData(brokerSeries)
+      s.setData([...brokerSeries].sort((a, b) => a.time - b.time))
     }
 
     chart.timeScale().fitContent()
@@ -138,11 +138,11 @@ function StrategyRow({ strat }) {
       <span className={`text-sm font-medium ${c.t2} font-mono truncate max-w-[160px]`}>{strat.strategy_id}</span>
       <div className="flex items-center gap-6 text-right shrink-0">
         <div>
-          <p className={`text-[10px] ${c.t4} uppercase tracking-wider`}>Realized</p>
+          <p className={`text-[10px] ${c.t4} uppercase tracking-wider`}>Funding Income</p>
           <p className={`text-sm font-mono ${pnlColor(realized)}`}>{fmt(realized)}</p>
         </div>
         <div>
-          <p className={`text-[10px] ${c.t4} uppercase tracking-wider`}>Unrealized</p>
+          <p className={`text-[10px] ${c.t4} uppercase tracking-wider`}>MTM Net</p>
           <p className={`text-sm font-mono ${pnlColor(unrealized)}`}>{fmt(unrealized)}</p>
         </div>
         <div>
@@ -159,9 +159,7 @@ export default function Performance() {
   const c = th(isDark)
   const [fund, setFund] = useState(null)
   const [strategySeries, setStrategySeries] = useState([])
-  const [strategyTotal, setStrategyTotal] = useState(null)
   const [brokerSeries, setBrokerSeries] = useState([])
-  const [brokerLatest, setBrokerLatest] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [brokers, setBrokers] = useState([])
 
@@ -179,12 +177,10 @@ export default function Performance() {
         if (aggRes.ok) {
           const d = await aggRes.json()
           setStrategySeries(d.series ?? [])
-          setStrategyTotal(d.total ?? null)
         }
         if (brokerRes.ok) {
           const d = await brokerRes.json()
           setBrokerSeries(d.series ?? [])
-          setBrokerLatest(d.latest ?? null)
         }
         if (pnlRes.ok) setStrategies((await pnlRes.json()).pnl ?? [])
         if (topoRes.ok) setBrokers((await topoRes.json()).brokers ?? [])
@@ -196,14 +192,8 @@ export default function Performance() {
   }, [])
 
   const hasChart = strategySeries.length >= 2 || brokerSeries.length >= 2
-  const brokerTotal = brokerLatest?.total ?? null
-  const drift = strategyTotal !== null && brokerTotal !== null
-    ? parseFloat(brokerTotal) - parseFloat(strategyTotal)
-    : null
-
   const aum = fund?.total_aum ?? null
   const available = fund?.total_available ?? null
-  const fundPnl = fund?.total_pnl ?? null
   const fundReal = fund?.total_realized ?? null
   const fundUnreal = fund?.total_unrealized ?? null
 
@@ -223,28 +213,21 @@ export default function Performance() {
           accent
         />
         <StatCard
-          label="Fund PnL"
-          value={fmt(fundPnl)}
-          sub={`R: ${fmt(fundReal)}  U: ${fmt(fundUnreal)}`}
-          valueClass={pnlColor(fundPnl)}
+          label="Realized"
+          value={fmt(fundReal)}
+          valueClass={pnlColor(fundReal)}
           accent
+        />
+        <StatCard
+          label="Unrealized"
+          value={fmt(fundUnreal)}
+          valueClass={pnlColor(fundUnreal)}
         />
         <StatCard
           label="Available"
           value={available !== null ? fmtAum(available) : '—'}
           sub="free margin across brokers"
         />
-        <div className={`rounded-xl p-4  flex flex-col gap-1 ${drift === null ? `${c.cardAlt} ${c.b1}` :
-          Math.abs(drift) < 0.01 ? `${c.cardAlt} ${c.b1}` : 'bg-yellow-950/30 border-yellow-700/50'
-          }`}>
-          <p className={`${c.t3} text-xs font-medium uppercase tracking-wider`}>Drift</p>
-          <p className={`text-2xl font-bold font-mono leading-tight ${drift === null ? c.t3 :
-            Math.abs(drift) < 0.01 ? 'text-[#26a69a]' : 'text-yellow-400'
-            }`}>
-            {drift === null ? '—' : fmt(drift)}
-          </p>
-          <p className={`${c.t4} text-[10px] mt-0.5`}>Broker − Strategy</p>
-        </div>
       </div>
 
       <div className={`${c.card} rounded-xl border ${c.b1} overflow-hidden`}>
@@ -252,10 +235,10 @@ export default function Performance() {
           <p className={`${c.t2} text-sm font-medium`}>PnL History</p>
           <div className={`flex gap-4 text-xs ${c.t4}`}>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block w-4 h-0.5 bg-[#26a69a]" /> Strategy
+              <span className="inline-block w-4 h-0.5 bg-[#26a69a]" /> Strategy (total)
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block w-4 h-0.5 bg-[#7b8cde] opacity-70" /> Broker
+              <span className="inline-block w-4 h-0.5 bg-[#7b8cde] opacity-70" /> Broker (total)
             </span>
           </div>
         </div>

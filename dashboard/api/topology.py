@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from dashboard.store import broker_exchange_states, pnl_latest, registered_strategies
+from dashboard.store import broker_exchange_states, feed_server_last_seen, pnl_latest, registered_strategies
 
 router = APIRouter()
 
@@ -29,10 +29,20 @@ async def get_topology() -> dict:
             active = False
         brokers.append({**state, "active": active})
 
+    feed_active = False
+    if feed_server_last_seen:
+        try:
+            last = _dt.datetime.fromisoformat(feed_server_last_seen)
+            feed_active = (now - last).total_seconds() < 15
+        except ValueError:
+            pass
+
     return {
         "strategies": list(strategies.values()),
         "brokers": brokers,
         "feed_server": {
+            "active": feed_active,
+            "last_seen": feed_server_last_seen,
             "publishes": [
                 "futures.{symbol}.bars.{interval}",
                 "futures.{symbol}.trades",

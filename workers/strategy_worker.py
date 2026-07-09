@@ -18,6 +18,7 @@ import importlib
 import json
 import logging
 import os
+from datetime import UTC, datetime
 import pkgutil
 from typing import TYPE_CHECKING
 
@@ -70,17 +71,10 @@ async def _listen_fills(
 
     async def _cb(msg: _nats_msg.Msg) -> None:
         fill = codec.decode_fill(msg.data)
-        runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price)
+        # Track every leg by (symbol, exchange) so spot and perp unrealized
+        # offset correctly for delta-neutral strategies.
+        runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price, exchange=fill.exchange)
         await runner.notify_fill(fill)
-        await nc.publish(
-            f"pnl.{strategy_id}",
-            codec.encode_pnl_snapshot(
-                strategy_id,
-                runner.pnl_calc.total_realized,
-                runner.pnl_calc.total_unrealized,
-                runner.pnl_calc.total,
-            ),
-        )
 
     await nc.subscribe(f"fills.{strategy_id}", cb=_cb)
     await asyncio.get_running_loop().create_future()
@@ -89,24 +83,44 @@ async def _listen_fills(
 async def _publish_heartbeat_periodically(
     nc: nats.aio.client.Client,
     strategy_id: str,
+    strategy_instance=None,
     interval: float = 8.0,
 ) -> None:
-    """Publish a heartbeat so the dashboard can show the strategy as active."""
-    payload = json.dumps({"strategy_id": strategy_id, "status": "active"}).encode()
+    """Publish a heartbeat so the dashboard can show the strategy as active.
+
+    If the strategy exposes ``heartbeat_state()`` (returning a dict snapshot
+    of fill_state, perp/spot qty, holding period, etc. per symbol), the
+    snapshot is included in the payload so the dashboard can render rich
+    per-symbol state without subscribing to fills/positions separately.
+    """
     while True:
         await asyncio.sleep(interval)
-        await nc.publish(f"strategy.heartbeat.{strategy_id}", payload)
+        body: dict = {
+            "strategy_id": strategy_id,
+            "status": "active",
+            "ts": datetime.now(UTC).isoformat(),
+        }
+        if strategy_instance is not None and hasattr(strategy_instance, "heartbeat_state"):
+            try:
+                body["state"] = strategy_instance.heartbeat_state()
+            except Exception as exc:
+                log.debug("heartbeat_state() raised: %s", exc)
+        await nc.publish(
+            f"strategy.heartbeat.{strategy_id}",
+            json.dumps(body, default=str).encode(),
+        )
 
 
 async def _publish_registration_periodically(
     nc: nats.aio.client.Client,
     strategy_cls: type[BaseStrategy],
-    interval: float = 30.0,
+    interval: float = 10.0,
 ) -> None:
     """Re-broadcast strategy registration so the dashboard recovers after a restart."""
     payload = json.dumps(
         {
             "name": strategy_cls.__name__,
+            "display_name": getattr(strategy_cls, "display_name", strategy_cls.__name__),
             "topics": list(strategy_cls.topics),
             "max_loss": str(strategy_cls.max_loss),
         }
@@ -116,31 +130,72 @@ async def _publish_registration_periodically(
         await nc.publish(f"strategy.register.{strategy_cls.__name__}", payload)
 
 
-async def _publish_pnl_periodically(
+async def _bridge_broker_pnl_to_strategy(
     nc: nats.aio.client.Client,
     strategy_id: str,
-    runner: StrategyRunner,
-    guard: StrategyGuard,  # PNL fix!!!
-    interval: float = 5.0,
+    guard: StrategyGuard,
 ) -> None:
-    """Publish unrealized PnL updates on a fixed interval and keep guard current."""
+    """Re-publish broker aggregate PnL as strategy PnL.
+
+    For a delta-neutral funding arb strategy the broker's equity change IS the
+    strategy's P&L (funding income - fees).  The fill-based PnLCalc always nets
+    to near zero while the position is open, so the strategy chart would be a
+    flat line.  Bridging broker.pnl here makes the chart show real performance.
+    """
     from decimal import Decimal
 
-    last_total: Decimal = Decimal(0)  # PNL fix!!!
-    while True:
-        await asyncio.sleep(interval)
-        current_total = runner.pnl_calc.total
-        guard.record_pnl(current_total - last_total)  # PNL fix!!!
-        last_total = current_total  # PNL fix!!!
-        await nc.publish(
-            f"pnl.{strategy_id}",
-            codec.encode_pnl_snapshot(
-                strategy_id,
-                runner.pnl_calc.total_realized,
-                runner.pnl_calc.total_unrealized,
-                runner.pnl_calc.total,
-            ),
-        )
+    # last_total is None until the first broker.pnl message arrives.  Until
+    # then we cannot compute a meaningful delta, so the guard is not fed.
+    # This prevents the strategy worker startup from synthesising a giant
+    # delta against a 0 baseline (especially harmful when the persisted
+    # baseline has been shifted, since the consolidator's first publish can
+    # be hundreds of dollars away from anything this worker has seen).
+    last_total: Decimal | None = None
+
+    # Sanity clamp: a real PnL change in 5 s on this fund cannot exceed
+    # max_loss * 2.  Any larger swing is treated as a publisher-restart
+    # artifact (e.g. consolidator reloaded with different baseline math),
+    # snaps the bridge baseline, and is NOT fed to the guard.  Without this
+    # clamp, the cascade observed 2026-05-03 13:40 UTC recurs: a synthetic
+    # ~$2.7K delta tripped the guard, and the runner's auto-flatten then
+    # opened phantom positions.
+    delta_clamp = guard.max_loss * Decimal(2)
+
+    async def _cb(msg: nats.aio.msg.Msg) -> None:
+        nonlocal last_total
+        try:
+            data = json.loads(msg.data)
+            current_total = Decimal(str(data.get("total", "0") or "0"))
+            if last_total is None:
+                # First message after process start — establish baseline only.
+                last_total = current_total
+            else:
+                delta = current_total - last_total
+                if abs(delta) > delta_clamp:
+                    # Treat as publisher restart / baseline shift artifact.
+                    log.warning(
+                        "broker.pnl delta %.2f exceeds clamp %.2f — snapping baseline",
+                        float(delta), float(delta_clamp),
+                    )
+                    last_total = current_total
+                else:
+                    guard.record_pnl(delta)
+                    last_total = current_total
+            await nc.publish(
+                f"pnl.{strategy_id}",
+                json.dumps({
+                    "strategy_id": strategy_id,
+                    "total_realized": data.get("total_realized", "0"),
+                    "total_unrealized": data.get("total_unrealized", "0"),
+                    "total": data.get("total", "0"),
+                    "timestamp": data.get("timestamp", ""),
+                }).encode(),
+            )
+        except Exception:
+            pass
+
+    await nc.subscribe("broker.pnl", cb=_cb)
+    await asyncio.get_running_loop().create_future()
 
 
 async def main() -> None:
@@ -162,9 +217,60 @@ async def main() -> None:
     guard = StrategyGuard(max_loss=strategy_cls.max_loss)
     pnl_calc = PnLCalc()
 
+    # Seed PnLCalc with current open positions from Bybit so that unrealized PnL
+    # is correct immediately after a restart without waiting for new fills.
+    # Uses the same brokers as the consolidator by reading env vars directly.
+    try:
+        from decimal import Decimal as _D
+        from execution.brokers.bybit import BybitBroker as _BybitBroker
+        from execution.brokers.bybit_spot import BybitSpotBroker as _BybitSpot
+        _perp = _BybitBroker(demo=True)
+        _spot = _BybitSpot(demo=True)
+        _perp_positions = await _perp.list_positions()
+        _spot_positions = await _spot.list_positions()
+        # Build perp entry price map — used as reference for spot seeding so
+        # both legs start at the same price and unrealized nets to ~$0.
+        perp_entry_map: dict[str, _D] = {}
+        for p in _perp_positions:
+            if p.quantity != _D(0):
+                pnl_calc.on_fill(p.symbol, p.quantity, p.avg_entry_price, exchange="bybit_demo")
+                if p.avg_entry_price > _D(0):
+                    perp_entry_map[p.symbol] = p.avg_entry_price
+        for p in _spot_positions:
+            if p.quantity > _D(0):
+                # Use perp entry as reference so spot unrealized offsets perp unrealized.
+                # Falls back to current price (usdValue/qty) if no matching perp.
+                entry = perp_entry_map.get(p.symbol, p.avg_entry_price)
+                pnl_calc.on_fill(p.symbol, p.quantity, entry, exchange="bybit_spot")
+        await _perp.aclose()
+        await _spot.aclose()
+        log.info(
+            "Seeded PnLCalc: %d perp + %d spot positions",
+            len(_perp_positions), len(_spot_positions),
+        )
+    except Exception as _exc:
+        log.warning("Could not seed PnLCalc from open positions: %s", _exc)
+
+    strategy_instance = strategy_cls()
+
+    # Restore strategy state from live broker positions on restart.
+    if hasattr(strategy_instance, "restore_from_positions"):
+        try:
+            from execution.brokers.bybit import BybitBroker as _BB
+            from execution.brokers.bybit_spot import BybitSpotBroker as _BS
+            _p = _BB(demo=True)
+            _s = _BS(demo=True)
+            _perp_pos = await _p.list_positions()
+            _spot_pos = await _s.list_positions()
+            await _p.aclose()
+            await _s.aclose()
+            strategy_instance.restore_from_positions(_perp_pos, _spot_pos)
+        except Exception as _exc:
+            log.warning("Could not restore strategy state from positions: %s", _exc)
+
     runner = StrategyRunner(
         strategy_id=strategy_id,
-        strategy=strategy_cls(),
+        strategy=strategy_instance,
         bus=bus,
         topics=strategy_cls.topics,
         target_queue=target_queue,
@@ -181,6 +287,7 @@ async def main() -> None:
             json.dumps(
                 {
                     "name": strategy_cls.__name__,
+                    "display_name": getattr(strategy_cls, "display_name", strategy_cls.__name__),
                     "topics": list(strategy_cls.topics),
                     "max_loss": str(strategy_cls.max_loss),
                 }
@@ -198,8 +305,8 @@ async def main() -> None:
             tg.create_task(runner.run())
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
-            tg.create_task(_publish_pnl_periodically(nc, strategy_id, runner, guard))  # PNL fix!!!
-            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id))
+            tg.create_task(_bridge_broker_pnl_to_strategy(nc, strategy_id, guard))
+            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id, strategy_instance))
             tg.create_task(_publish_registration_periodically(nc, strategy_cls))
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")

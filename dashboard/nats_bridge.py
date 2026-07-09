@@ -19,6 +19,7 @@ from dashboard.store import (
     record_bar,
     record_broker_exchange_pnl,
     record_broker_pnl,
+    record_feed_server_activity,
     record_fill,
     record_order,
     record_pnl,
@@ -50,6 +51,9 @@ async def start(nc: nats.aio.client.Client) -> None:
         except Exception:
             data = msg.data.decode()
 
+        if msg.subject.startswith("futures."):
+            record_feed_server_activity()
+
         if (
             msg.subject.startswith("futures.")
             and ".bars." in msg.subject
@@ -57,7 +61,10 @@ async def start(nc: nats.aio.client.Client) -> None:
         ):
             record_bar(data, msg.subject)
         elif msg.subject.startswith("orders.placed.") and isinstance(data, dict):
-            record_order(data)
+            # Subject: orders.placed.{exchange}.{symbol}
+            _parts = msg.subject.split(".")
+            _exchange = _parts[2] if len(_parts) >= 4 else ""
+            record_order(data, exchange=_exchange)
         elif msg.subject.startswith("fills.") and isinstance(data, dict):
             record_fill(data)
         elif msg.subject.startswith("strategy.register.") and isinstance(data, dict):

@@ -118,10 +118,11 @@ class BybitBroker(BaseBroker):
         return cast("dict[str, Any]", r.json())
 
     async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        sorted_params = dict(sorted(params.items()))
+        query = "&".join(f"{k}={v}" for k, v in sorted_params.items())
         ts = self._ts()
         r = await self._client.get(
-            path, params=params, headers=self._auth_headers(ts, query)
+            path, params=sorted_params, headers=self._auth_headers(ts, query)
         )
         r.raise_for_status()
         return cast("dict[str, Any]", r.json())
@@ -191,6 +192,42 @@ class BybitBroker(BaseBroker):
 
     # ------------------------------------------------------------------ read-only
 
+    async def recent_fills(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the most recent filled orders from Bybit order history.
+
+        Used on consolidator startup to replay today's fills into the dashboard
+        so the Orders panel is populated even after a backend restart.
+        Returns raw dicts with keys: symbol, side, qty, price, created_time.
+        """
+        try:
+            resp = await self._get(
+                "/v5/order/history",
+                {"category": "linear", "limit": str(limit), "orderStatus": "Filled"},
+            )
+        except Exception:
+            return []
+        if resp.get("retCode", -1) != 0:
+            return []
+        result = []
+        for o in resp.get("result", {}).get("list", []):
+            # Convert Bybit ms timestamp to ISO date prefix for day filtering
+            created_ms = int(o.get("createdTime", 0) or 0)
+            from datetime import UTC, datetime
+            created_iso = (
+                datetime.fromtimestamp(created_ms / 1000, tz=UTC).date().isoformat()
+                if created_ms else ""
+            )
+            result.append({
+                "symbol": o.get("symbol", ""),
+                "side": o.get("side", ""),
+                "order_type": o.get("orderType", ""),
+                "quantity": o.get("qty", "0"),
+                "price": o.get("avgPrice") or o.get("price") or "0",
+                "reduce_only": o.get("reduceOnly", False),
+                "created_time": created_iso,
+            })
+        return result
+
     async def open_orders(self, symbol: str | None = None) -> list[Order]:
         params: dict[str, Any] = {"category": "linear", "limit": "50"}
         if symbol:
@@ -232,34 +269,108 @@ class BybitBroker(BaseBroker):
             return None
 
         items = resp.get("result", {}).get("list", [])
-        # Bybit returns one-way and hedge positions; take the net non-zero entry
+        # Net all entries (Bybit returns separate Buy/Sell rows in hedge mode).
+        # Summing signed quantities gives the true net position so the
+        # consolidator computes the correct broker_delta regardless of mode.
+        net_qty = Decimal(0)
+        total_realized = Decimal(0)
+        total_unrealized = Decimal(0)
+        mark = Decimal(0)
+        avg_entry = Decimal(0)
+        liq_price: str | None = None
+
         for item in items:
             qty = Decimal(item.get("size", "0"))
             if qty == Decimal(0):
                 continue
             side_sign = Decimal(1) if item.get("side") == "Buy" else Decimal(-1)
-            signed_qty = qty * side_sign
-            realized = Decimal(item.get("cumRealisedPnl", "0"))
-            unrealized = Decimal(item.get("unrealisedPnl", "0"))
+            net_qty += qty * side_sign
+            total_realized += Decimal(item.get("cumRealisedPnl", "0"))
+            total_unrealized += Decimal(item.get("unrealisedPnl", "0"))
             mark = Decimal(item.get("markPrice", "0"))
-            avg_entry = Decimal(item.get("avgPrice", "0"))
-            liq_price = item.get("liqPrice")
+            if not avg_entry:
+                avg_entry = Decimal(item.get("avgPrice", "0"))
+            if not liq_price:
+                liq_price = item.get("liqPrice")
 
-            # Update PnL cache per symbol so multi-symbol totals are correct
-            self._realized_pnl_cache[symbol] = realized  # PNL fix!!!
-            self._unrealized_pnl_cache[symbol] = unrealized  # PNL fix!!!
+        # Update PnL cache per symbol so multi-symbol totals are correct
+        self._realized_pnl_cache[symbol] = total_realized  # PNL fix!!!
+        self._unrealized_pnl_cache[symbol] = total_unrealized  # PNL fix!!!
 
-            return PerpPosition(
-                symbol=symbol,
-                quantity=signed_qty,
-                avg_entry_price=avg_entry,
-                unrealized_pnl=unrealized,
-                realized_pnl=realized,
-                mark_price=mark,
-                liquidation_price=Decimal(liq_price) if liq_price else None,
-                funding_paid=None,
+        if net_qty == Decimal(0):
+            return None
+
+        return PerpPosition(
+            symbol=symbol,
+            quantity=net_qty,
+            avg_entry_price=avg_entry,
+            unrealized_pnl=total_unrealized,
+            realized_pnl=total_realized,
+            mark_price=mark,
+            liquidation_price=Decimal(liq_price) if liq_price else None,
+            funding_paid=None,
+        )
+
+    async def list_positions(self) -> list[PerpPosition]:
+        """Return all open linear positions from Bybit (no symbol filter).
+
+        Nets Buy and Sell entries for the same symbol so callers always see
+        a single signed quantity per symbol (mirrors one-way mode behaviour).
+        """
+        try:
+            resp = await self._get(
+                "/v5/position/list",
+                {"category": "linear", "settleCoin": "USDT", "limit": "200"},
             )
-        return None
+        except Exception:
+            return []
+        if resp.get("retCode", -1) != 0:
+            return []
+
+        # Accumulate per symbol to net hedge-mode Buy/Sell entries.
+        buckets: dict[str, dict[str, Any]] = {}
+        for item in resp.get("result", {}).get("list", []):
+            qty = Decimal(item.get("size", "0"))
+            if qty == Decimal(0):
+                continue
+            sym = item.get("symbol", "")
+            side_sign = Decimal(1) if item.get("side") == "Buy" else Decimal(-1)
+            if sym not in buckets:
+                buckets[sym] = {
+                    "net_qty": Decimal(0),
+                    "realized": Decimal(0),
+                    "unrealized": Decimal(0),
+                    "mark": Decimal(0),
+                    "avg_entry": Decimal(0),
+                    "liq_price": None,
+                }
+            b = buckets[sym]
+            b["net_qty"] += qty * side_sign
+            b["realized"] += Decimal(item.get("cumRealisedPnl", "0"))
+            b["unrealized"] += Decimal(item.get("unrealisedPnl", "0"))
+            b["mark"] = Decimal(item.get("markPrice", "0"))
+            if not b["avg_entry"]:
+                b["avg_entry"] = Decimal(item.get("avgPrice", "0"))
+            if not b["liq_price"]:
+                b["liq_price"] = item.get("liqPrice")
+
+        positions = []
+        for sym, b in buckets.items():
+            if b["net_qty"] == Decimal(0):
+                continue
+            self._realized_pnl_cache[sym] = b["realized"]
+            self._unrealized_pnl_cache[sym] = b["unrealized"]
+            positions.append(PerpPosition(
+                symbol=sym,
+                quantity=b["net_qty"],
+                avg_entry_price=b["avg_entry"],
+                unrealized_pnl=b["unrealized"],
+                realized_pnl=b["realized"],
+                mark_price=b["mark"],
+                liquidation_price=Decimal(b["liq_price"]) if b["liq_price"] else None,
+                funding_paid=None,
+            ))
+        return positions
 
     # ------------------------------------------------------------------ account
 

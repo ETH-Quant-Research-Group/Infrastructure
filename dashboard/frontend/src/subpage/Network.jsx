@@ -155,7 +155,7 @@ const StrategyNodeRef = ({ strategy, isActive, nodeRef }) => {
   return (
     <div ref={nodeRef} className={`${c.nodeBg} border ${c.b3} rounded-lg p-3`}>
       <div className={`text-xs font-semibold ${c.t2} uppercase tracking-wider mb-0.5`}>StrategyRunner</div>
-      <div className={`text-xs font-semibold ${c.t1} mb-2`}>{strategy.name}</div>
+      <div className={`text-xs font-semibold ${c.t1} mb-2`}>{strategy.display_name ?? strategy.name}</div>
       <div className={`border ${c.b3} rounded p-2 mb-3 ${c.inset}`}>
         <div className={`text-xs font-semibold ${c.t3} uppercase tracking-wider mb-1`}>StrategyGuard</div>
         <div className={`text-xs ${c.t2} mb-1`}>

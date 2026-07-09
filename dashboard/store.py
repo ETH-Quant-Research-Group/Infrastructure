@@ -1,9 +1,29 @@
-"""In-memory store for dashboard state populated by the NATS bridge."""
+"""In-memory store for dashboard state populated by the NATS bridge.
+
+When a :class:`~dashboard.persistence.DashboardDB` is attached via
+:func:`set_persistence`, every ``record_*`` call also writes to SQLite
+so data survives dashboard restarts.
+"""
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from dashboard.persistence import DashboardDB
+
+log = logging.getLogger(__name__)
+
+# Optional SQLite persistence — set via set_persistence() on startup.
+_db: DashboardDB | None = None
+
+
+def set_persistence(db: DashboardDB) -> None:
+    """Attach a SQLite database for durable storage."""
+    global _db
+    _db = db
 
 
 class OrderRecord(TypedDict):
@@ -13,6 +33,7 @@ class OrderRecord(TypedDict):
     quantity: str
     price: str
     reduce_only: bool
+    exchange: str
     placed_at: str  # ISO-8601
 
 
@@ -23,6 +44,14 @@ _MAX_ORDERS = 500
 
 registered_strategies: dict[str, dict] = {}
 
+# ISO-8601 timestamp of the last futures.* message received from the feed server.
+feed_server_last_seen: str | None = None
+
+
+def record_feed_server_activity() -> None:
+    global feed_server_last_seen
+    feed_server_last_seen = datetime.now(UTC).isoformat()
+
 
 def register_strategy(data: dict) -> None:
     registered_strategies[data["name"]] = data
@@ -32,7 +61,7 @@ def unregister_strategy(name: str) -> None:
     registered_strategies.pop(name, None)
 
 
-def record_order(data: dict[str, object]) -> None:
+def record_order(data: dict[str, object], exchange: str = "") -> None:
     record: OrderRecord = {
         "symbol": str(data.get("symbol", "")),
         "side": str(data.get("side", "")),
@@ -40,11 +69,14 @@ def record_order(data: dict[str, object]) -> None:
         "quantity": str(data.get("quantity", "")),
         "price": str(data.get("price", "")),
         "reduce_only": bool(data.get("reduce_only", False)),
+        "exchange": exchange,
         "placed_at": datetime.now(UTC).isoformat(),
     }
     orders.append(record)
     if len(orders) > _MAX_ORDERS:
         del orders[: len(orders) - _MAX_ORDERS]
+    if _db is not None:
+        _db.insert_order(record)
 
 
 class PnLRecord(TypedDict):
@@ -95,17 +127,20 @@ def record_bar(data: dict, subject: str) -> None:
     }
     key = f"{sym}_{interval}"
     history = bars_store.setdefault(key, [])
-    # Replace last bar if same timestamp (live update of in-progress candle)
-    if history and history[-1]["time"] == t:
-        history[-1] = bar
-    else:
-        history.append(bar)
-        if len(history) > _MAX_BARS:
-            del history[: len(history) - _MAX_BARS]
+    # Replace existing bar with same timestamp (handles both live updates and
+    # historical seeds that arrive out of order or overlap with stored bars).
+    for i, existing in enumerate(history):
+        if existing["time"] == t:
+            history[i] = bar
+            return
+    history.append(bar)
+    if len(history) > _MAX_BARS:
+        del history[: len(history) - _MAX_BARS]
 
 
 class PositionRecord(TypedDict):
     symbol: str
+    exchange: str
     quantity: str  # signed: positive = long, negative = short
     avg_entry_price: str
     unrealized_pnl: str
@@ -116,58 +151,72 @@ class PositionRecord(TypedDict):
 
 _CLOSED_RETENTION_SECONDS = 60 * 60 * 24  # 24 hours
 
-# Open positions keyed by symbol.
+# Open positions keyed by "{exchange}_{symbol}".
 positions: dict[str, PositionRecord] = {}
-# Recently closed positions keyed by symbol, retained for _CLOSED_RETENTION_SECONDS.
+# Recently closed positions keyed by "{exchange}_{symbol}".
 closed_positions: dict[str, PositionRecord] = {}
+
+# Baseline realized PnL per position — captures first value on backend start
+# so the dashboard always shows PnL relative to session start, not all-time.
+_position_realized_baseline: dict[str, float] = {}
 
 
 def record_positions(snapshot: list[dict]) -> None:
     """Diff the broker snapshot against the current store.
 
-    - New / updated symbols go into ``positions``.
-    - Symbols that disappear from the snapshot are moved to ``closed_positions``
-      and kept for up to 24 hours.
+    - New / updated positions go into ``positions`` (keyed by exchange+symbol).
+    - Positions that disappear from the snapshot are moved to ``closed_positions``.
     - Expired closed positions are pruned on every call.
     """
     now = datetime.now(UTC)
 
     # Prune expired closed positions
     expired = [
-        sym
-        for sym, rec in closed_positions.items()
+        k
+        for k, rec in closed_positions.items()
         if rec["closed_at"] is not None
         and (now - datetime.fromisoformat(rec["closed_at"])).total_seconds()
         > _CLOSED_RETENTION_SECONDS
     ]
-    for sym in expired:
-        del closed_positions[sym]
+    for k in expired:
+        del closed_positions[k]
 
     incoming = set()
     for p in snapshot:
         sym = str(p.get("symbol", ""))
+        exchange = str(p.get("exchange", ""))
         if not sym:
             continue
-        incoming.add(sym)
-        positions[sym] = {
+        key = f"{exchange}_{sym}" if exchange else sym
+        incoming.add(key)
+
+        raw_realized = float(str(p.get("realized_pnl", "0") or "0"))
+        # Capture baseline on first appearance so realized PnL starts at 0
+        if key not in _position_realized_baseline:
+            _position_realized_baseline[key] = raw_realized
+        baselined_realized = raw_realized - _position_realized_baseline[key]
+
+        positions[key] = {
             "symbol": sym,
+            "exchange": exchange,
             "quantity": str(p.get("quantity", "0")),
             "avg_entry_price": str(p.get("avg_entry_price", "0")),
             "unrealized_pnl": str(p.get("unrealized_pnl", "0")),
-            "realized_pnl": str(p.get("realized_pnl", "0")),
+            "realized_pnl": str(round(baselined_realized, 8)),
             "status": "open",
             "closed_at": None,
         }
-        # If it was previously closed but re-opened, remove from closed store
-        closed_positions.pop(sym, None)
+        closed_positions.pop(key, None)
 
-    # Detect symbols that just disappeared → move to closed
-    for sym in list(positions.keys()):
-        if sym not in incoming:
-            rec = positions.pop(sym)
+    # Detect positions that just disappeared → move to closed
+    for key in list(positions.keys()):
+        if key not in incoming:
+            rec = positions.pop(key)
             rec["status"] = "closed"
             rec["closed_at"] = now.isoformat()
-            closed_positions[sym] = rec
+            closed_positions[key] = rec
+            # Remove baseline so a fresh open of the same symbol gets a new baseline
+            _position_realized_baseline.pop(key, None)
 
 
 class FillRecord(TypedDict):
@@ -175,6 +224,7 @@ class FillRecord(TypedDict):
     symbol: str
     quantity: str  # signed: positive = bought, negative = sold
     fill_price: str
+    exchange: str
     filled_at: str  # ISO-8601
 
 
@@ -192,12 +242,15 @@ def record_fill(data: dict) -> None:
         "symbol": str(data.get("symbol", "")),
         "quantity": str(data.get("quantity", "")),
         "fill_price": str(data.get("fill_price", "")),
+        "exchange": str(data.get("exchange", "")),
         "filled_at": datetime.now(UTC).isoformat(),
     }
     history = fills_by_strategy.setdefault(sid, [])
     history.append(record)
     if len(history) > _MAX_FILLS:
         del history[: len(history) - _MAX_FILLS]
+    if _db is not None:
+        _db.insert_fill(record)
 
 
 class BrokerPnLRecord(TypedDict):
@@ -215,16 +268,22 @@ _MAX_BROKER_PNL_HISTORY = 1000
 # Per-exchange broker state, updated whenever broker.pnl.{exchange} arrives.
 broker_exchange_states: dict[str, dict] = {}
 
-
 def record_broker_exchange_pnl(data: dict) -> None:
     exchange = str(data.get("exchange", ""))
     if not exchange or exchange == "all":
         return
+
+    # The consolidator already baselines each exchange to 0 at startup.
+    # Pass values through directly — no second baseline needed here.
+    total = float(data.get("total", "0") or "0")
+    realized = float(data.get("total_realized", "0") or "0")
+    unrealized = float(data.get("total_unrealized", "0") or "0")
+
     state: dict = {
         "exchange": exchange,
-        "total": str(data.get("total", "0")),
-        "total_realized": str(data.get("total_realized", "0")),
-        "total_unrealized": str(data.get("total_unrealized", "0")),
+        "total": str(round(total, 8)),
+        "total_realized": str(round(realized, 8)),
+        "total_unrealized": str(round(unrealized, 8)),
         "last_seen": datetime.now(UTC).isoformat(),
     }
     if data.get("total_equity") is not None:
@@ -238,16 +297,24 @@ def record_broker_exchange_pnl(data: dict) -> None:
 
 def record_broker_pnl(data: dict) -> None:
     global broker_pnl_latest
+    # The consolidator already baselines the aggregate to 0 at startup.
+    # Pass values through directly — no second baseline needed here.
+    realized = float(data.get("total_realized", "0") or "0")
+    unrealized = float(data.get("total_unrealized", "0") or "0")
+    total = float(data.get("total", "0") or "0")
+
     record: BrokerPnLRecord = {
-        "total_realized": str(data.get("total_realized", "0")),
-        "total_unrealized": str(data.get("total_unrealized", "0")),
-        "total": str(data.get("total", "0")),
+        "total_realized": str(round(realized, 8)),
+        "total_unrealized": str(round(unrealized, 8)),
+        "total": str(round(total, 8)),
         "timestamp": str(data.get("timestamp", "")),
     }
     broker_pnl_latest = record
     broker_pnl_history.append(record)
     if len(broker_pnl_history) > _MAX_BROKER_PNL_HISTORY:
         del broker_pnl_history[: len(broker_pnl_history) - _MAX_BROKER_PNL_HISTORY]
+    if _db is not None:
+        _db.insert_broker_pnl(record)
 
 
 def record_pnl(data: dict) -> None:
@@ -264,3 +331,5 @@ def record_pnl(data: dict) -> None:
     history.append(record)
     if len(history) > _MAX_PNL_HISTORY:
         del history[: len(history) - _MAX_PNL_HISTORY]
+    if _db is not None:
+        _db.insert_strategy_pnl(record)

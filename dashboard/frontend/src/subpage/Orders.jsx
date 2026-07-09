@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTheme, th } from '../theme'
+import { fmtUTC } from '../utils/format'
 
 const POLL_MS = 3000
 
@@ -47,7 +48,8 @@ export default function Orders() {
                   style={{ gridTemplateColumns: '1fr auto auto' }}>
                   <div className="flex flex-col gap-1">
                     <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{o.symbol}</span>
-                    <span className={`text-[11px] font-medium ${c.t4} leading-tight`}>{new Date(o.placed_at).toLocaleTimeString()}</span>
+                    <span className={`text-[11px] font-mono ${c.t4} leading-tight tabular-nums`}>{fmtUTC(o.placed_at)}</span>
+                    {o.exchange && <span className={`text-[10px] ${c.t5} leading-tight font-mono`}>{o.exchange}</span>}
                   </div>
                   <div className="flex flex-col items-end gap-1 pr-3">
                     <span className={`text-[13px] font-medium leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>

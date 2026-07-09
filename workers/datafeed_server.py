@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import nats
@@ -54,34 +55,53 @@ async def _run_stream(
     ref_counts: dict[str, int],
     tasks: dict[str, asyncio.Task[None]],
 ) -> None:
-    try:
-        parts = subject.split(".")
-        market, symbol, stream_type = parts[0], parts[1], parts[2]
+    parts = subject.split(".")
+    market, symbol, stream_type = parts[0], parts[1], parts[2]
 
-        client = clients_by_market.get(market)
-        if client is None:
-            log.warning("No client for market %r — ignoring %s", market, subject)
-            return
-
-        if stream_type == "bars":
-            await _stream(
-                nc, subject, client.live_time_bars(symbol, KlineInterval(parts[3]))
-            )
-        elif stream_type == "trades":
-            await _stream(nc, subject, client.live_trades(symbol))
-        elif stream_type == "funding_rate" and isinstance(
-            client, BaseCryptoFuturesClient
-        ):
-            await _stream(nc, subject, client.live_funding_rates(symbol))
-        else:
-            log.warning("Unknown stream type %r in subject %s", stream_type, subject)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        log.exception("Stream %s failed", subject)
-    finally:
+    client = clients_by_market.get(market)
+    if client is None:
+        log.warning("No client for market %r — ignoring %s", market, subject)
         ref_counts.pop(subject, None)
         tasks.pop(subject, None)
+        return
+
+    # Retry loop — restarts the stream on failure instead of dying silently.
+    while subject in ref_counts:
+        try:
+            if stream_type == "bars":
+                interval_str = parts[3]
+                kinterval = KlineInterval(interval_str)
+                hours = {"1m": 1/60, "5m": 5/60, "15m": 0.25, "1h": 1, "4h": 4, "8h": 8, "1d": 24}.get(interval_str, 8)
+                try:
+                    end = datetime.now(UTC)
+                    start = end - timedelta(hours=hours * 60)  # last 60 bars
+                    hist = await client.time_bars(symbol, kinterval, start=start, end=end)
+                    hist_sorted = sorted(hist, key=lambda b: b.timestamp)
+                    for bar in hist_sorted:
+                        await nc.publish(subject, codec.encode(bar))
+                    log.info("Seeded %d historical bars for %s", len(hist_sorted), subject)
+                except Exception as exc:
+                    log.warning("Could not seed historical bars for %s: %s", subject, exc)
+                await _stream(
+                    nc, subject, client.live_time_bars(symbol, kinterval)
+                )
+            elif stream_type == "trades":
+                await _stream(nc, subject, client.live_trades(symbol))
+            elif stream_type == "funding_rate" and isinstance(
+                client, BaseCryptoFuturesClient
+            ):
+                await _stream(nc, subject, client.live_funding_rates(symbol))
+            else:
+                log.warning("Unknown stream type %r in subject %s", stream_type, subject)
+                break
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Stream %s failed — restarting in 10s", subject)
+            await asyncio.sleep(10)
+
+    ref_counts.pop(subject, None)
+    tasks.pop(subject, None)
 
 
 async def main() -> None:
