@@ -1253,11 +1253,15 @@ name = "infrastructure"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
     { name = "lighter-sdk" },
     { name = "nats-py" },
     { name = "websockets" },
+]
+
+[package.optional-dependencies]
+webapp = [
+    { name = "fastapi", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
@@ -1276,12 +1280,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.135.1" },
+    { name = "fastapi", extras = ["standard"], marker = "extra == 'webapp'", specifier = ">=0.135.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lighter-sdk", git = "https://github.com/elliottech/lighter-python.git" },
     { name = "nats-py", specifier = ">=2.6.0" },
     { name = "websockets", specifier = ">=16.0" },
 ]
+provides-extras = ["webapp"]
 
 [package.metadata.requires-dev]
 dev = [

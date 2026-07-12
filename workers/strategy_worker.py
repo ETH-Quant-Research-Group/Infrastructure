@@ -18,8 +18,8 @@ import importlib
 import json
 import logging
 import os
-from datetime import UTC, datetime
 import pkgutil
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import nats
@@ -73,7 +73,9 @@ async def _listen_fills(
         fill = codec.decode_fill(msg.data)
         # Track every leg by (symbol, exchange) so spot and perp unrealized
         # offset correctly for delta-neutral strategies.
-        runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price, exchange=fill.exchange)
+        runner.pnl_calc.on_fill(
+            fill.symbol, fill.quantity, fill.fill_price, exchange=fill.exchange
+        )
         await runner.notify_fill(fill)
 
     await nc.subscribe(f"fills.{strategy_id}", cb=_cb)
@@ -100,7 +102,9 @@ async def _publish_heartbeat_periodically(
             "status": "active",
             "ts": datetime.now(UTC).isoformat(),
         }
-        if strategy_instance is not None and hasattr(strategy_instance, "heartbeat_state"):
+        if strategy_instance is not None and hasattr(
+            strategy_instance, "heartbeat_state"
+        ):
             try:
                 body["state"] = strategy_instance.heartbeat_state()
             except Exception as exc:
@@ -120,7 +124,9 @@ async def _publish_registration_periodically(
     payload = json.dumps(
         {
             "name": strategy_cls.__name__,
-            "display_name": getattr(strategy_cls, "display_name", strategy_cls.__name__),
+            "display_name": getattr(
+                strategy_cls, "display_name", strategy_cls.__name__
+            ),
             "topics": list(strategy_cls.topics),
             "max_loss": str(strategy_cls.max_loss),
         }
@@ -175,7 +181,8 @@ async def _bridge_broker_pnl_to_strategy(
                     # Treat as publisher restart / baseline shift artifact.
                     log.warning(
                         "broker.pnl delta %.2f exceeds clamp %.2f — snapping baseline",
-                        float(delta), float(delta_clamp),
+                        float(delta),
+                        float(delta_clamp),
                     )
                     last_total = current_total
                 else:
@@ -183,16 +190,18 @@ async def _bridge_broker_pnl_to_strategy(
                     last_total = current_total
             await nc.publish(
                 f"pnl.{strategy_id}",
-                json.dumps({
-                    "strategy_id": strategy_id,
-                    "total_realized": data.get("total_realized", "0"),
-                    "total_unrealized": data.get("total_unrealized", "0"),
-                    "total": data.get("total", "0"),
-                    "timestamp": data.get("timestamp", ""),
-                }).encode(),
+                json.dumps(
+                    {
+                        "strategy_id": strategy_id,
+                        "total_realized": data.get("total_realized", "0"),
+                        "total_unrealized": data.get("total_unrealized", "0"),
+                        "total": data.get("total", "0"),
+                        "timestamp": data.get("timestamp", ""),
+                    }
+                ).encode(),
             )
-        except Exception:
-            pass
+        except Exception:  # nosec B110 - fire-and-forget NATS callback; a bad
+            pass  # broker.pnl payload shouldn't kill the subscription.
 
     await nc.subscribe("broker.pnl", cb=_cb)
     await asyncio.get_running_loop().create_future()
@@ -201,7 +210,7 @@ async def _bridge_broker_pnl_to_strategy(
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s  %(name)s  %(message)s",
+        format="%(asctime)s  %(levelname)s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
     strategy_name = os.environ.get("STRATEGY_NAME", "")
@@ -222,8 +231,10 @@ async def main() -> None:
     # Uses the same brokers as the consolidator by reading env vars directly.
     try:
         from decimal import Decimal as _D
+
         from execution.brokers.bybit import BybitBroker as _BybitBroker
         from execution.brokers.bybit_spot import BybitSpotBroker as _BybitSpot
+
         _perp = _BybitBroker(demo=True)
         _spot = _BybitSpot(demo=True)
         _perp_positions = await _perp.list_positions()
@@ -233,20 +244,24 @@ async def main() -> None:
         perp_entry_map: dict[str, _D] = {}
         for p in _perp_positions:
             if p.quantity != _D(0):
-                pnl_calc.on_fill(p.symbol, p.quantity, p.avg_entry_price, exchange="bybit_demo")
+                pnl_calc.on_fill(
+                    p.symbol, p.quantity, p.avg_entry_price, exchange="bybit_demo"
+                )
                 if p.avg_entry_price > _D(0):
                     perp_entry_map[p.symbol] = p.avg_entry_price
         for p in _spot_positions:
             if p.quantity > _D(0):
-                # Use perp entry as reference so spot unrealized offsets perp unrealized.
-                # Falls back to current price (usdValue/qty) if no matching perp.
+                # Use perp entry as reference so spot unrealized offsets
+                # perp unrealized. Falls back to current price
+                # (usdValue/qty) if no matching perp.
                 entry = perp_entry_map.get(p.symbol, p.avg_entry_price)
                 pnl_calc.on_fill(p.symbol, p.quantity, entry, exchange="bybit_spot")
         await _perp.aclose()
         await _spot.aclose()
         log.info(
             "Seeded PnLCalc: %d perp + %d spot positions",
-            len(_perp_positions), len(_spot_positions),
+            len(_perp_positions),
+            len(_spot_positions),
         )
     except Exception as _exc:
         log.warning("Could not seed PnLCalc from open positions: %s", _exc)
@@ -258,6 +273,7 @@ async def main() -> None:
         try:
             from execution.brokers.bybit import BybitBroker as _BB
             from execution.brokers.bybit_spot import BybitSpotBroker as _BS
+
             _p = _BB(demo=True)
             _s = _BS(demo=True)
             _perp_pos = await _p.list_positions()
@@ -287,7 +303,9 @@ async def main() -> None:
             json.dumps(
                 {
                     "name": strategy_cls.__name__,
-                    "display_name": getattr(strategy_cls, "display_name", strategy_cls.__name__),
+                    "display_name": getattr(
+                        strategy_cls, "display_name", strategy_cls.__name__
+                    ),
                     "topics": list(strategy_cls.topics),
                     "max_loss": str(strategy_cls.max_loss),
                 }
@@ -306,7 +324,9 @@ async def main() -> None:
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
             tg.create_task(_bridge_broker_pnl_to_strategy(nc, strategy_id, guard))
-            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id, strategy_instance))
+            tg.create_task(
+                _publish_heartbeat_periodically(nc, strategy_id, strategy_instance)
+            )
             tg.create_task(_publish_registration_periodically(nc, strategy_cls))
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")

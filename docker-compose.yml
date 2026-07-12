@@ -1,0 +1,225 @@
+name: infra
+
+x-worker-build: &worker-build
+  context: .
+  dockerfile: Dockerfile.worker
+
+x-worker-env: &worker-env
+  NATS_URL: nats://nats:4222
+
+x-bybit-env: &bybit-env
+  BYBIT_API_KEY: ${BYBIT_API_KEY}
+  BYBIT_API_SECRET: ${BYBIT_API_SECRET}
+  BYBIT_DEMO: ${BYBIT_DEMO:-1}
+
+networks:
+  # Fixed name (not project-prefixed) so the manager can `docker run
+  # --network infra-net ...` ad-hoc containers (e.g. deployed strategy
+  # images) that still need to reach `nats` by DNS name.
+  app:
+    name: infra-net
+
+services:
+  # ---------------------------------------------------------------------
+  # Message bus — everything else talks through this.
+  # ---------------------------------------------------------------------
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    networks: [app]
+    ports:
+      - "4222:4222"
+
+  # ---------------------------------------------------------------------
+  # Data streams — pulls market data from exchanges, publishes to NATS.
+  #
+  # This is the ONLY worker service with a `build:` block. consolidator and
+  # every strategy-* service below reuse the resulting `infra-worker:latest`
+  # tag via `image:` alone — they must NOT each declare their own `build:`,
+  # or `docker compose build` rebuilds the identical image once per service
+  # (redundant git clone + pip/apt downloads, multiplied by 6).
+  # Run `docker compose build datafeed` (or just `up --build`) first so the
+  # tag exists before the others start.
+  # ---------------------------------------------------------------------
+  datafeed:
+    build: *worker-build
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.datafeed_server"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: *worker-env
+    depends_on:
+      - nats
+
+  # ---------------------------------------------------------------------
+  # Consolidator + brokers — nets strategy signals and places live orders.
+  # ---------------------------------------------------------------------
+  consolidator:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.consolidator_worker"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      DEFAULT_EXCHANGE: ${DEFAULT_EXCHANGE:-bybit_demo}
+    volumes:
+      - webapp_data:/root/.qrf
+    depends_on:
+      - nats
+
+  # ---------------------------------------------------------------------
+  # Webapp — REST API, WebSocket feed, and the built frontend.
+  #
+  # No `ports:` here on purpose — oauth2-proxy is the public entry point
+  # now (see below). Publishing this directly would let anyone bypass the
+  # auth gate on /internal and /api/deploy by hitting this port instead.
+  # ---------------------------------------------------------------------
+  webapp:
+    build:
+      context: .
+      dockerfile: Dockerfile.webapp
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: *worker-env
+      API_TOKEN: ${API_TOKEN:-}
+    volumes:
+      - webapp_data:/root/.qrf
+    depends_on:
+      - nats
+
+  # ---------------------------------------------------------------------
+  # oauth2-proxy — the actual public entry point. Sits in front of webapp
+  # and gates ONLY /internal* and /api/deploy* behind GitHub org login;
+  # everything else (the public tabs, public API reads, /ws) passes
+  # through via --skip-auth-regex without needing a session at all.
+  # ---------------------------------------------------------------------
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    restart: unless-stopped
+    networks: [app]
+    ports:
+      - "${OAUTH2_PROXY_PORT:-4180}:4180"
+    environment:
+      OAUTH2_PROXY_PROVIDER: github
+      OAUTH2_PROXY_GITHUB_ORG: ${GITHUB_ORG:-ETH-Quant-Research-Group}
+      OAUTH2_PROXY_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_UPSTREAMS: http://webapp:8000
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REDIRECT_URL: https://${PUBLIC_HOSTNAME:-qrfzurich.com}/oauth2/callback
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      # TEMPORARILY DISABLED (matches every path — nothing is gated).
+      # OAUTH2_PROXY_REDIRECT_URL above is hardcoded to PUBLIC_HOSTNAME, so
+      # the GitHub login loop can't complete when testing locally against
+      # oauth2-proxy directly (not through the real domain via cloudflared).
+      # To re-enable: restore the line below and remove this override.
+      # OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/$,^/(performance|strategies|assets|network)(/.*)?$,^/strategy/,^/api/(market|positions|orders|strategies|performance|topology)(/.*)?$,^/ws/"
+      OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/"
+    depends_on:
+      - webapp
+
+  # ---------------------------------------------------------------------
+  # Strategies — one container per strategy class. All carry the
+  # "strategies" profile so a bare `docker compose up` does NOT start them;
+  # the manager brings up exactly the ones listed in ACTIVE_STRATEGIES by
+  # naming them explicitly (which bypasses profile gating).
+  # ---------------------------------------------------------------------
+  strategy-example:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_worker"]
+    profiles: ["strategies"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      STRATEGY_NAME: ExampleStrategy
+    depends_on:
+      - nats
+
+  strategy-momentum:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_worker"]
+    profiles: ["strategies"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      STRATEGY_NAME: MomentumStrategy
+    depends_on:
+      - nats
+
+  strategy-funding-arb:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_worker"]
+    profiles: ["strategies"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      STRATEGY_NAME: FundingArbStrategy
+    depends_on:
+      - nats
+
+  strategy-funding-arb-2-0:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_worker"]
+    profiles: ["strategies"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      STRATEGY_NAME: FundingArb20Strategy
+    depends_on:
+      - nats
+
+  strategy-funding-arb-bybit:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_worker"]
+    profiles: ["strategies"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      STRATEGY_NAME: FundingArbBybitStrategy
+    depends_on:
+      - nats
+
+  # ---------------------------------------------------------------------
+  # Manager — controls the rest of the stack from inside Docker via the
+  # mounted socket. Reconciles ACTIVE_STRATEGIES against the strategy-*
+  # services and restarts anything that dies. `docker compose exec manager
+  # manage.sh` gives an interactive menu (status/logs/restart/enable/disable).
+  #
+  # Also runs an internal-only HTTP server (deploy_server.py, port 9000, not
+  # published to the host) that the webapp calls to pull + run arbitrary
+  # strategy images from the ETH-Quant-Research-Group GHCR namespace. This
+  # is the only container with docker.sock access — the webapp, which is
+  # tunneled to a public hostname, never gets it directly.
+  # ---------------------------------------------------------------------
+  manager:
+    build:
+      context: ./docker/manager
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: [*worker-env, *bybit-env]
+      ACTIVE_STRATEGIES: ${ACTIVE_STRATEGIES:-ExampleStrategy}
+      DOCKER_NETWORK: infra-net
+      ALLOWED_IMAGE_PREFIX: ${ALLOWED_IMAGE_PREFIX:-ghcr.io/eth-quant-research-group/}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/workspace:ro
+      - manager_state:/state
+    working_dir: /workspace
+    depends_on:
+      - nats
+
+volumes:
+  webapp_data:
+  manager_state:

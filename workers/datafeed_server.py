@@ -71,20 +71,32 @@ async def _run_stream(
             if stream_type == "bars":
                 interval_str = parts[3]
                 kinterval = KlineInterval(interval_str)
-                hours = {"1m": 1/60, "5m": 5/60, "15m": 0.25, "1h": 1, "4h": 4, "8h": 8, "1d": 24}.get(interval_str, 8)
+                hours = {
+                    "1m": 1 / 60,
+                    "5m": 5 / 60,
+                    "15m": 0.25,
+                    "1h": 1,
+                    "4h": 4,
+                    "8h": 8,
+                    "1d": 24,
+                }.get(interval_str, 8)
                 try:
                     end = datetime.now(UTC)
                     start = end - timedelta(hours=hours * 60)  # last 60 bars
-                    hist = await client.time_bars(symbol, kinterval, start=start, end=end)
+                    hist = await client.time_bars(
+                        symbol, kinterval, start=start, end=end
+                    )
                     hist_sorted = sorted(hist, key=lambda b: b.timestamp)
                     for bar in hist_sorted:
                         await nc.publish(subject, codec.encode(bar))
-                    log.info("Seeded %d historical bars for %s", len(hist_sorted), subject)
+                    log.info(
+                        "Seeded %d historical bars for %s", len(hist_sorted), subject
+                    )
                 except Exception as exc:
-                    log.warning("Could not seed historical bars for %s: %s", subject, exc)
-                await _stream(
-                    nc, subject, client.live_time_bars(symbol, kinterval)
-                )
+                    log.warning(
+                        "Could not seed historical bars for %s: %s", subject, exc
+                    )
+                await _stream(nc, subject, client.live_time_bars(symbol, kinterval))
             elif stream_type == "trades":
                 await _stream(nc, subject, client.live_trades(symbol))
             elif stream_type == "funding_rate" and isinstance(
@@ -92,7 +104,9 @@ async def _run_stream(
             ):
                 await _stream(nc, subject, client.live_funding_rates(symbol))
             else:
-                log.warning("Unknown stream type %r in subject %s", stream_type, subject)
+                log.warning(
+                    "Unknown stream type %r in subject %s", stream_type, subject
+                )
                 break
         except asyncio.CancelledError:
             raise
@@ -107,7 +121,7 @@ async def _run_stream(
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s  %(name)s  %(message)s",
+        format="%(asctime)s  %(levelname)s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
 

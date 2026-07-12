@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+#
+# Webapp image — the only container with FastAPI/uvicorn and the built
+# React frontend. Serves REST API, WebSocket feed, and static SPA on one port.
+# (Backs onto the `webapp/` package + `workers/webapp.py` entrypoint.)
+
+# ---------------------------------------------------------------------------
+# Stage 1: build the Vite/React frontend into static assets.
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS frontend
+
+WORKDIR /frontend
+COPY webapp/frontend/package.json webapp/frontend/package-lock.json ./
+RUN npm ci
+COPY webapp/frontend/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 2: Python backend + built frontend.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS backend
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --extra webapp --no-install-project
+
+COPY clients ./clients
+COPY config ./config
+COPY data ./data
+COPY engine ./engine
+COPY execution ./execution
+COPY interfaces ./interfaces
+COPY strategies ./strategies
+COPY utils ./utils
+COPY workers ./workers
+COPY webapp ./webapp
+# Frontend source isn't needed at runtime — only the built dist/, copied
+# from the frontend stage below.
+RUN rm -rf webapp/frontend
+
+COPY --from=frontend /frontend/dist ./webapp/frontend/dist
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+CMD ["uvicorn", "workers.webapp:app", "--host", "0.0.0.0", "--port", "8000"]

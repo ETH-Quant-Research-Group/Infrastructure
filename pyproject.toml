@@ -24,12 +24,18 @@ description = "Core infrastructure of the fund"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi[standard]>=0.135.1",
     "httpx>=0.28.1",
     "lighter-sdk",
     "nats-py>=2.6.0",
     "websockets>=16.0",
 ]  # runtime deps go here as modules are built out
+
+[project.optional-dependencies]
+# Only the webapp container needs FastAPI/uvicorn — keeping it out of the
+# base deps keeps the datafeed/consolidator/strategy worker images lightweight.
+webapp = [
+    "fastapi[standard]>=0.135.1",
+]
 
 [dependency-groups]
 dev = [

@@ -1,0 +1,8 @@
+# compose-service-name=StrategyClassName
+# Keep in sync with the strategy-* services in docker-compose.yml and the
+# BaseStrategy subclasses in strategies/.
+strategy-example=ExampleStrategy
+strategy-momentum=MomentumStrategy
+strategy-funding-arb=FundingArbStrategy
+strategy-funding-arb-2-0=FundingArb20Strategy
+strategy-funding-arb-bybit=FundingArbBybitStrategy

@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+#
+# Lightweight worker image — used by the datafeed, consolidator, and every
+# strategy container. No FastAPI/uvicorn, no Node/frontend build: just the
+# base runtime deps (nats-py, httpx, websockets, lighter-sdk).
+#
+# Each service overrides `command:` in docker-compose.yml to select which
+# worker module actually runs (workers.datafeed_server / .consolidator_worker
+# / .strategy_worker).
+
+FROM python:3.11-slim AS base
+
+# git is required by `uv sync` to fetch lighter-sdk, which is pinned to a git
+# source in pyproject.toml ([tool.uv.sources]).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY clients ./clients
+COPY config ./config
+COPY data ./data
+COPY engine ./engine
+COPY execution ./execution
+COPY interfaces ./interfaces
+COPY strategies ./strategies
+COPY utils ./utils
+COPY workers ./workers
+# consolidator_worker only needs the sqlite persistence layer, not the
+# FastAPI app/routers/frontend that live alongside it.
+COPY webapp/persistence.py ./webapp/persistence.py
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "workers.datafeed_server"]
