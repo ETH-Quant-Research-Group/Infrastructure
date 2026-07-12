@@ -87,12 +87,12 @@ Environment variables:
 - `NATS_URL` (default: `nats://localhost:4222`)
 - `DEFAULT_EXCHANGE` (default: `bybit_paper`) — `bybit_paper` or `paper`
 
-### 5. Dashboard Backend
+### 5. Webapp Backend
 
 Serves the REST API and WebSocket feed.
 
 ```bash
-uv run uvicorn workers.dashboard:app --reload --port 8000
+uv run uvicorn workers.webapp:app --reload --port 8000
 ```
 
 Environment variables:
@@ -100,10 +100,10 @@ Environment variables:
 
 API docs available at `http://localhost:8000/docs`.
 
-### 6. Dashboard Frontend
+### 6. Webapp Frontend
 
 ```bash
-cd dashboard/frontend
+cd webapp/frontend
 npm run dev
 ```
 
