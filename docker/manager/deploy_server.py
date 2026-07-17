@@ -34,6 +34,8 @@ ALLOWED_IMAGE_PREFIX = os.environ.get(
 ).lower()
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "infra-net")
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+MODES = ("backtest", "paper", "live")
+_DEFAULT_MODE = "paper"  # safer default than "live" if the field is omitted
 
 # Passed through to every deployed container so it can reach the rest of
 # the stack the same way the built-in strategy-* services do.
@@ -80,21 +82,32 @@ def _custom_deployments() -> list[dict]:
     return deployed
 
 
-def _validate_deploy(body: dict) -> tuple[str, str, dict] | tuple[None, None, None]:
-    """Returns (name, image, env) or (None, None, None) if invalid."""
+def _validate_deploy(
+    body: dict,
+) -> tuple[str, str, dict, str] | tuple[None, None, None, None]:
+    """Returns (name, image, env, mode) or all-None if invalid.
+
+    `mode` (backtest/paper/live) is a label only — nothing downstream
+    branches on it yet. Stored and passed through as TRADING_MODE so a
+    strategy image can read it later, once that distinction is actually
+    implemented.
+    """
     name = str(body.get("name", "")).strip()
     image = str(body.get("image", "")).strip()
     env = body.get("env") or {}
+    mode = str(body.get("mode", "")).strip().lower() or _DEFAULT_MODE
 
     if not NAME_RE.match(name):
-        return None, None, None
+        return None, None, None, None
     if not image.lower().startswith(ALLOWED_IMAGE_PREFIX):
-        return None, None, None
+        return None, None, None, None
+    if mode not in MODES:
+        return None, None, None, None
     if not isinstance(env, dict) or not all(
         isinstance(k, str) and isinstance(v, str) for k, v in env.items()
     ):
-        return None, None, None
-    return name, image, env
+        return None, None, None, None
+    return name, image, env, mode
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -199,6 +212,34 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"\r\n")
         self.wfile.flush()
 
+    def _start_sse(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+    def _end_sse(self) -> None:
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            self.wfile.write(b"0\r\n\r\n")
+
+    def _emit_event(self, event: str, **fields: object) -> None:
+        """Structured line, distinguished from raw command output by prefix
+        so the frontend can special-case error/running transitions."""
+        self._write_sse_chunk("__EVENT__" + json.dumps({"event": event, **fields}))
+
+    def _stream_command(self, cmd: list[str], cwd: str | None = None) -> int:
+        """Runs cmd, relaying stdout/stderr line-by-line as SSE chunks.
+        Returns the exit code."""
+        self._write_sse_chunk(f"$ {' '.join(cmd)}")
+        proc = subprocess.Popen(  # nosec B603 - shell=False, list args, see _run() above
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cwd
+        )
+        for line in iter(proc.stdout.readline, ""):
+            self._write_sse_chunk(line.rstrip("\n"))
+        proc.wait()
+        return proc.returncode
+
     def _handle_logs(self, name: str) -> None:
         if not NAME_RE.match(name):
             self._send_json(400, {"error": "invalid name"})
@@ -226,11 +267,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "unknown service"})
             return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
+        self._start_sse()
 
         proc = subprocess.Popen(  # nosec B603 - shell=False, list args, see _run() above
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cwd
@@ -246,8 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                self.wfile.write(b"0\r\n\r\n")
+            self._end_sse()
 
     def _handle_deploy(self) -> None:
         try:
@@ -256,14 +292,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid JSON body"})
             return
 
-        name, image, env = _validate_deploy(body)
+        name, image, env, mode = _validate_deploy(body)
         if name is None:
             self._send_json(
                 400,
                 {
-                    "error": "invalid name or image",
+                    "error": "invalid name, image, or mode",
                     "detail": f"image must start with {ALLOWED_IMAGE_PREFIX!r}; "
-                    "name must be alnum/dash/underscore, max 64 chars",
+                    "name must be alnum/dash/underscore, max 64 chars; "
+                    f"mode must be one of {MODES}",
                 },
             )
             return
@@ -271,58 +308,84 @@ class Handler(BaseHTTPRequestHandler):
         container = _container_name(name)
         os.makedirs(STATE_DIR, exist_ok=True)
 
-        # Redeploy semantics: stop+remove any previous container for this name.
-        _run(["docker", "stop", container])
-        _run(["docker", "rm", container])
+        # From here on this is a live progress stream, not a single JSON
+        # response — docker pull on a several-hundred-MB image can take a
+        # while, and the caller (the /internal Deploy page) wants to show
+        # that happening rather than a spinner with zero information.
+        self._start_sse()
+        try:
+            # Redeploy semantics: stop+remove any previous container for this name.
+            self._stream_command(["docker", "stop", container])
+            self._stream_command(["docker", "rm", container])
 
-        pull = _run(["docker", "pull", image], timeout=600)
-        if pull.returncode != 0:
-            self._send_json(
-                502, {"error": "docker pull failed", "detail": pull.stderr[-4000:]}
-            )
-            return
+            if self._stream_command(["docker", "pull", image]) != 0:
+                self._emit_event("error", detail="docker pull failed")
+                return
 
-        run_cmd = [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            container,
-            "--network",
-            DOCKER_NETWORK,
-            "--restart",
-            "unless-stopped",
-            "--label",
-            "infra.managed=custom",
-            "--label",
-            f"infra.deploy.name={name}",
-        ]
-        for key in _PASSTHROUGH_ENV:
-            val = os.environ.get(key)
-            if val:
+            run_cmd = [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                container,
+                "--network",
+                DOCKER_NETWORK,
+                "--restart",
+                "unless-stopped",
+                "--label",
+                "infra.managed=custom",
+                "--label",
+                f"infra.deploy.name={name}",
+                "--label",
+                f"infra.deploy.mode={mode}",
+            ]
+            for key in _PASSTHROUGH_ENV:
+                val = os.environ.get(key)
+                if val:
+                    run_cmd += ["-e", f"{key}={val}"]
+            run_cmd += ["-e", f"TRADING_MODE={mode}"]
+            for key, val in env.items():
                 run_cmd += ["-e", f"{key}={val}"]
-        for key, val in env.items():
-            run_cmd += ["-e", f"{key}={val}"]
-        run_cmd.append(image)
+            run_cmd.append(image)
 
-        run = _run(run_cmd)
-        if run.returncode != 0:
-            self._send_json(
-                502, {"error": "docker run failed", "detail": run.stderr[-4000:]}
+            if self._stream_command(run_cmd) != 0:
+                self._emit_event("error", detail="docker run failed — see output above")
+                return
+
+            record = {
+                "name": name,
+                "image": image,
+                "container": container,
+                "env": env,
+                "mode": mode,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+            with open(_state_path(name), "w") as f:
+                json.dump(record, f)
+
+            self._emit_event("running", **record)
+
+            # Seamlessly continue into the container's own startup output —
+            # same live feed, no reconnect needed on the frontend side.
+            log_proc = subprocess.Popen(  # nosec B603 B607
+                ["docker", "logs", "-f", container],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
-            return
-
-        record = {
-            "name": name,
-            "image": image,
-            "container": container,
-            "env": env,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-        with open(_state_path(name), "w") as f:
-            json.dump(record, f)
-
-        self._send_json(200, {"status": "deployed", **record})
+            try:
+                for line in iter(log_proc.stdout.readline, ""):
+                    self._write_sse_chunk(line.rstrip("\n"))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                log_proc.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    log_proc.wait(timeout=5)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self._end_sse()
 
     def _handle_stop(self, name: str) -> None:
         if not NAME_RE.match(name) or not os.path.exists(_state_path(name)):

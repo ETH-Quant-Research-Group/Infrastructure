@@ -8,8 +8,7 @@ import logoDark from './assets/QRFLogo.png'
 import logoLight from './assets/QRF_light.png'
 import { useTheme, th } from './theme'
 
-const TABS = { Status, Logs, Deploy }
-const TAB_NAMES = Object.keys(TABS)
+const TAB_NAMES = ['Status', 'Logs', 'Deploy']
 
 // Reached only via oauth2-proxy (GitHub org login) — see docker-compose.yml's
 // oauth2-proxy service, which gates this path (and /api/ops*, /api/deploy*)
@@ -21,7 +20,12 @@ export default function Internal({ onToggleTheme }) {
   const isDark = useTheme()
   const c = th(isDark)
   const [tab, setTab] = useState('Status')
-  const Active = TABS[tab]
+  const [logsTarget, setLogsTarget] = useState('')
+
+  function viewLogsFor(service) {
+    setLogsTarget(service)
+    setTab('Logs')
+  }
 
   return (
     <div className={`flex flex-col min-h-screen ${c.bg}`}>
@@ -63,7 +67,9 @@ export default function Internal({ onToggleTheme }) {
             </button>
           ))}
         </div>
-        <Active />
+        {tab === 'Status' && <Status />}
+        {tab === 'Logs' && <Logs initialService={logsTarget} />}
+        {tab === 'Deploy' && <Deploy onViewLogs={viewLogsFor} />}
       </main>
     </div>
   )

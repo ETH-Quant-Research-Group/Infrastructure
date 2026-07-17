@@ -84,6 +84,8 @@ services:
     environment:
       <<: *worker-env
       API_TOKEN: ${API_TOKEN:-}
+      GITHUB_ORG: ${GITHUB_ORG:-ETH-Quant-Research-Group}
+      GITHUB_PACKAGES_TOKEN: ${GITHUB_PACKAGES_TOKEN:-}
     volumes:
       - webapp_data:/root/.qrf
     depends_on:
@@ -212,6 +214,8 @@ services:
       ACTIVE_STRATEGIES: ${ACTIVE_STRATEGIES:-ExampleStrategy}
       DOCKER_NETWORK: infra-net
       ALLOWED_IMAGE_PREFIX: ${ALLOWED_IMAGE_PREFIX:-ghcr.io/eth-quant-research-group/}
+      GITHUB_USERNAME: ${GITHUB_USERNAME:-}
+      GITHUB_PACKAGES_TOKEN: ${GITHUB_PACKAGES_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/workspace:ro
