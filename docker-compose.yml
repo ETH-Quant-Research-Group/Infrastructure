@@ -86,6 +86,9 @@ services:
       API_TOKEN: ${API_TOKEN:-}
       GITHUB_ORG: ${GITHUB_ORG:-ETH-Quant-Research-Group}
       GITHUB_PACKAGES_TOKEN: ${GITHUB_PACKAGES_TOKEN:-}
+      # Real (production) default: auth enforced. Local dev flips this via
+      # docker-compose.override.yml, not by editing this file.
+      DEV_MODE: ${DEV_MODE:-0}
     volumes:
       - webapp_data:/root/.qrf
     depends_on:
@@ -116,13 +119,13 @@ services:
       OAUTH2_PROXY_REDIRECT_URL: https://${PUBLIC_HOSTNAME:-qrfzurich.com}/oauth2/callback
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_REVERSE_PROXY: "true"
-      # TEMPORARILY DISABLED (matches every path — nothing is gated).
-      # OAUTH2_PROXY_REDIRECT_URL above is hardcoded to PUBLIC_HOSTNAME, so
-      # the GitHub login loop can't complete when testing locally against
-      # oauth2-proxy directly (not through the real domain via cloudflared).
-      # To re-enable: restore the line below and remove this override.
-      # OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/$,^/(performance|strategies|assets|network)(/.*)?$,^/strategy/,^/api/(market|positions|orders|strategies|performance|topology)(/.*)?$,^/ws/"
-      OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/"
+      # Anything NOT matched here requires a GitHub-org-authenticated
+      # session. Keep this in sync with webapp/frontend/src/App.jsx routes
+      # and webapp/app.py routers whenever a new public page/endpoint is
+      # added. This is the real (production) config — local dev disables
+      # this via docker-compose.override.yml instead of editing this file;
+      # see that file for how to actually run in "full auth" mode.
+      OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/$,^/(performance|strategies|assets|network)(/.*)?$,^/strategy/,^/api/(market|positions|orders|strategies|performance|topology)(/.*)?$,^/ws/"
     depends_on:
       - webapp
 
