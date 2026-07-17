@@ -16,6 +16,12 @@ class StrategyGuard:
         guard = StrategyGuard(max_loss=Decimal("500"))
         guard.record_pnl(Decimal("-600"))
         assert not guard.is_active
+
+    NOTE: any new configurable field added here should also get an env var
+    override in workers/strategy_worker.py (see _resolve_max_loss) AND a
+    matching form field in webapp/frontend/src/subpage/Deploy.jsx — the
+    /internal Deploy page is how these get set per-deployment, so a guard
+    param that's not exposed there is silently unconfigurable from the UI.
     """
 
     max_loss: Decimal  # positive threshold, e.g. Decimal("500")

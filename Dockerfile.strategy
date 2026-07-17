@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+#
+# Packages a single strategy as a standalone, self-contained image for the
+# /internal Deploy page — STRATEGY_NAME is baked in at build time (not
+# required at `docker run`), so the image just works once deployed. Leaner
+# than Dockerfile.worker: no `clients/` (only datafeed needs exchange
+# clients directly) and no webapp/persistence.py (only consolidator needs
+# DB access) — a standalone strategy container needs neither.
+#
+# Build:
+#   docker build -f Dockerfile.strategy \
+#     --build-arg STRATEGY_NAME=FundingArbBybitStrategy \
+#     -t ghcr.io/eth-quant-research-group/funding-arb-bybit:latest .
+
+FROM python:3.11-slim
+
+# git is required by `uv sync` to fetch lighter-sdk, which is pinned to a git
+# source in pyproject.toml ([tool.uv.sources]).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY config ./config
+COPY data ./data
+COPY engine ./engine
+COPY execution ./execution
+COPY interfaces ./interfaces
+COPY strategies ./strategies
+COPY utils ./utils
+COPY workers ./workers
+
+ARG STRATEGY_NAME
+ENV STRATEGY_NAME=${STRATEGY_NAME}
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "workers.strategy_worker"]

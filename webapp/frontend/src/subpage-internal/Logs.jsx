@@ -53,11 +53,11 @@ function LogStream({ service, c, search, activeLevels }) {
   )
 }
 
-export default function Logs() {
+export default function Logs({ initialService = '' }) {
   const isDark = useTheme()
   const c = th(isDark)
   const [services, setServices] = useState([])
-  const [selected, setSelected] = useState('')
+  const [selected, setSelected] = useState(initialService)
   const [search, setSearch] = useState('')
   const [activeLevels, setActiveLevels] = useState(() => new Set())
 

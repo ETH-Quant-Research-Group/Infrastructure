@@ -20,6 +20,7 @@ import logging
 import os
 import pkgutil
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 import nats
@@ -50,6 +51,25 @@ def _load_strategy(name: str) -> type[BaseStrategy]:
                 return cls
 
     raise RuntimeError(f"Strategy '{name}' not found in the strategies package")
+
+
+def _resolve_max_loss(strategy_cls: type[BaseStrategy]) -> Decimal:
+    """MAX_DRAWDOWN env var overrides the strategy's own default when set —
+    e.g. by the /internal Deploy page's "Max drawdown" field. Falls back to
+    ``strategy_cls.max_loss`` if unset or not a valid number.
+    """
+    raw = os.environ.get("MAX_DRAWDOWN", "").strip()
+    if not raw:
+        return strategy_cls.max_loss
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        log.warning(
+            "MAX_DRAWDOWN=%r is not a valid number — using strategy default %s",
+            raw,
+            strategy_cls.max_loss,
+        )
+        return strategy_cls.max_loss
 
 
 async def _forward_targets(
@@ -118,6 +138,7 @@ async def _publish_heartbeat_periodically(
 async def _publish_registration_periodically(
     nc: nats.aio.client.Client,
     strategy_cls: type[BaseStrategy],
+    max_loss: Decimal,
     interval: float = 10.0,
 ) -> None:
     """Re-broadcast strategy registration so the dashboard recovers after a restart."""
@@ -128,7 +149,7 @@ async def _publish_registration_periodically(
                 strategy_cls, "display_name", strategy_cls.__name__
             ),
             "topics": list(strategy_cls.topics),
-            "max_loss": str(strategy_cls.max_loss),
+            "max_loss": str(max_loss),
         }
     ).encode()
     while True:
@@ -223,7 +244,7 @@ async def main() -> None:
     strategy_id = strategy_cls.__name__
     bus = NatsBus()
     target_queue: asyncio.Queue[TargetPosition] = asyncio.Queue()
-    guard = StrategyGuard(max_loss=strategy_cls.max_loss)
+    guard = StrategyGuard(max_loss=_resolve_max_loss(strategy_cls))
     pnl_calc = PnLCalc()
 
     # Seed PnLCalc with current open positions from Bybit so that unrealized PnL
@@ -307,7 +328,7 @@ async def main() -> None:
                         strategy_cls, "display_name", strategy_cls.__name__
                     ),
                     "topics": list(strategy_cls.topics),
-                    "max_loss": str(strategy_cls.max_loss),
+                    "max_loss": str(guard.max_loss),
                 }
             ).encode(),
         )
@@ -327,7 +348,9 @@ async def main() -> None:
             tg.create_task(
                 _publish_heartbeat_periodically(nc, strategy_id, strategy_instance)
             )
-            tg.create_task(_publish_registration_periodically(nc, strategy_cls))
+            tg.create_task(
+                _publish_registration_periodically(nc, strategy_cls, guard.max_loss)
+            )
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")
         for topic in strategy_cls.topics:
