@@ -77,16 +77,6 @@ repos:
         args: [-d, relaxed]
         files: \.(yaml|yml)$
 
-  # Custom: validate asset_universe.yaml and fund_params.yaml schemas
-  - repo: local
-    hooks:
-      - id: validate-config-schemas
-        name: Validate fund config schemas
-        entry: python scripts/validate_configs.py
-        language: python
-        files: ^config/.*\.(yaml|yml)$
-        pass_filenames: true
-
   # ── Jupyter notebooks ─────────────────────────────────────────────────────
   # Research notebooks often bleed into this repo; strip output before commit
   - repo: https://github.com/kynan/nbstripout

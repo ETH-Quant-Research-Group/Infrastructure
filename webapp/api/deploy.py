@@ -5,11 +5,10 @@ This is a thin forwarder — all the actual docker.sock work happens in the
 `manager` container's internal deploy_server.py (reachable only inside the
 compose network, never published to the host).
 
-TEMPORARILY UNGATED: the ``require_token`` dependency is disabled below
-while oauth2-proxy's auth is also disabled (see docker-compose.yml's
-OAUTH2_PROXY_SKIP_AUTH_REGEX). Re-enable both together — passing
-``dependencies=[Depends(require_token)]`` to APIRouter() below, matching
-the commented-out line.
+Every endpoint here requires ``require_token`` (see webapp/auth/token.py) —
+belt-and-suspenders on top of oauth2-proxy, which is the real gate. Both
+get bypassed together in local dev via DEV_MODE (see
+docker-compose.override.yml), never by editing this file.
 """
 
 from __future__ import annotations
@@ -19,18 +18,16 @@ import os
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# from fastapi import Depends
-# from webapp.auth import require_token
+from webapp.auth import require_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-router = APIRouter()
-# router = APIRouter(dependencies=[Depends(require_token)])
+router = APIRouter(dependencies=[Depends(require_token)])
 
 _MANAGER_URL = "http://manager:9000"
 _GITHUB_API = "https://api.github.com"

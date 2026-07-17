@@ -1,0 +1,24 @@
+# Local-dev override — Docker Compose auto-loads this file whenever it's
+# present, merging it into docker-compose.yml with no extra flags needed.
+# That means plain `docker compose up` defaults to auth OFF, which is what
+# you want for local testing (oauth2-proxy's redirect_uri is pinned to
+# PUBLIC_HOSTNAME, so the GitHub login loop can't complete against
+# localhost anyway — see docker-compose.yml's oauth2-proxy comments).
+#
+# To run in the REAL (production) config — auth actually enforced —
+# explicitly exclude this file:
+#
+#   docker compose -f docker-compose.yml up -d
+#
+# Do that on any real deployment (Raspberry Pi, wherever qrfzurich.com
+# actually points). Only the two keys below differ from docker-compose.yml;
+# everything else is inherited as-is.
+
+services:
+  webapp:
+    environment:
+      DEV_MODE: "1"
+
+  oauth2-proxy:
+    environment:
+      OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/"
