@@ -63,6 +63,11 @@ services:
     environment:
       <<: [*worker-env, *bybit-env]
       DEFAULT_EXCHANGE: ${DEFAULT_EXCHANGE:-bybit_demo}
+      # Fallback risk cap applied to any strategy_id with no admin-configured
+      # "Max drawdown" (see /internal Deploy page, and
+      # engine/order/guard_registry.py) — including compose-managed
+      # strategy-* services, which don't go through that form at all.
+      DEFAULT_MAX_LOSS: ${DEFAULT_MAX_LOSS:-1000}
     volumes:
       - webapp_data:/root/.qrf
     depends_on:
