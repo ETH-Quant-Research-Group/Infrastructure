@@ -151,7 +151,11 @@ function FeedServerNode({ publishedSubjects, isActive }) {
 const StrategyNodeRef = ({ strategy, isActive, nodeRef }) => {
   const isDark = useTheme()
   const c = th(isDark)
-  const guardActive = isActive(`strategy.heartbeat.${strategy.name}`, GUARD_TTL)
+  // strategy.guard.<name> (not heartbeat) is the real signal here — it's
+  // published by the consolidator only while that strategy's guard is
+  // active (engine/order/guard_registry.py), so this reflects actual
+  // enforcement state, not just "is the container still running."
+  const guardActive = isActive(`strategy.guard.${strategy.name}`, GUARD_TTL)
   return (
     <div ref={nodeRef} className={`${c.nodeBg} border ${c.b3} rounded-lg p-3`}>
       <div className={`text-xs font-semibold ${c.t2} uppercase tracking-wider mb-0.5`}>StrategyRunner</div>

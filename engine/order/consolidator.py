@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     import asyncio
 
+    from engine.order.guard_registry import StrategyGuardRegistry
     from interfaces.broker import BaseBroker
     from interfaces.signals import TargetPosition
 
@@ -21,7 +22,11 @@ OrderFactory = Callable[[str, OrderSide, Decimal, Decimal, str], Order]
 
 
 def _default_order_factory(
-    symbol: str, side: OrderSide, quantity: Decimal, _price: Decimal, _exchange: str = ""
+    symbol: str,
+    side: OrderSide,
+    quantity: Decimal,
+    _price: Decimal,
+    _exchange: str = "",
 ) -> Order:
     return Order(
         symbol=symbol,
@@ -69,6 +74,7 @@ class OrderConsolidator:
         placed_queue: asyncio.Queue[tuple[str, Order]] | None = None,
         fills_queue: asyncio.Queue[FillConfirmation] | None = None,
         order_factory: OrderFactory = _default_order_factory,
+        guard_registry: StrategyGuardRegistry | None = None,
     ) -> None:
         if default_exchange not in brokers:
             raise ValueError(
@@ -82,6 +88,7 @@ class OrderConsolidator:
         self._placed_queue = placed_queue
         self._fills_queue = fills_queue
         self._order_factory = order_factory
+        self._guard_registry = guard_registry
         # strategy_id → {(exchange, symbol) → cumulative qty}
         self._positions: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(dict)
 
@@ -135,7 +142,9 @@ class OrderConsolidator:
                 self._positions[seed_key][key] = pos.quantity
                 log.info(
                     "Consolidator seeded: [%s] %s qty=%s",
-                    exchange, pos.symbol, pos.quantity,
+                    exchange,
+                    pos.symbol,
+                    pos.quantity,
                 )
 
     async def run(self) -> None:
@@ -158,6 +167,21 @@ class OrderConsolidator:
         if qty_delta == Decimal(0):
             return
 
+        if self._guard_registry is not None and not self._guard_registry.is_active(
+            strategy_id
+        ):
+            # Guard tripped (or was never configured active) for this
+            # strategy — drop the signal entirely, same as if it never
+            # arrived. Unlike the old in-process guard, this cannot be
+            # bypassed by the strategy's own container.
+            log.warning(
+                "dropping signal for halted strategy_id=%r: %s qty=%s",
+                strategy_id,
+                symbol,
+                qty_delta,
+            )
+            return
+
         key = (exchange, symbol)
 
         old_pos = self._positions[strategy_id].get(key, Decimal(0))
@@ -176,16 +200,17 @@ class OrderConsolidator:
         order_failed = False
         if abs(broker_delta) >= self._min_order_size:
             side = OrderSide.BUY if broker_delta > Decimal(0) else OrderSide.SELL
-            order = self._order_factory(symbol, side, abs(broker_delta), target.price, exchange)
+            order = self._order_factory(
+                symbol, side, abs(broker_delta), target.price, exchange
+            )
 
             # For perp orders: mark reduce_only when the delta reduces or closes
             # an existing broker position. This ensures Bybit records the order
             # as "Close Short" / "Close Long" rather than "Open Long" / "Open Short",
             # and prevents accidentally opening an opposite position in hedge mode.
             if isinstance(order, PerpOrder) and current_qty != Decimal(0):
-                is_reducing = (
-                    (current_qty > 0 and broker_delta < 0)
-                    or (current_qty < 0 and broker_delta > 0)
+                is_reducing = (current_qty > 0 and broker_delta < 0) or (
+                    current_qty < 0 and broker_delta > 0
                 )
                 if is_reducing:
                     order = replace(order, reduce_only=True)
@@ -195,13 +220,21 @@ class OrderConsolidator:
             if result.error:
                 log.error(
                     "order FAILED [%s] %s %s qty=%s: %s",
-                    exchange, symbol, side, abs(broker_delta), result.error,
+                    exchange,
+                    symbol,
+                    side,
+                    abs(broker_delta),
+                    result.error,
                 )
                 order_failed = True
             else:
                 log.info(
                     "order OK [%s] %s %s qty=%s id=%s",
-                    exchange, symbol, side, abs(broker_delta), result.order_id,
+                    exchange,
+                    symbol,
+                    side,
+                    abs(broker_delta),
+                    result.order_id,
                 )
 
             if self._placed_queue is not None:
@@ -214,13 +247,18 @@ class OrderConsolidator:
         # when broker_delta == 0, meaning the broker already holds the target
         # position — phantom fill used for strategy state reconstruction after
         # consolidator restart).
-        if self._fills_queue is not None and not order_failed:
-            self._fills_queue.put_nowait(
-                FillConfirmation(
-                    strategy_id=strategy_id,
-                    symbol=symbol,
-                    quantity=qty_delta,
-                    fill_price=fill_price,
-                    exchange=exchange,
+        if not order_failed:
+            if self._fills_queue is not None:
+                self._fills_queue.put_nowait(
+                    FillConfirmation(
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        quantity=qty_delta,
+                        fill_price=fill_price,
+                        exchange=exchange,
+                    )
                 )
-            )
+            if self._guard_registry is not None:
+                self._guard_registry.record_fill(
+                    strategy_id, symbol, exchange, qty_delta, fill_price
+                )

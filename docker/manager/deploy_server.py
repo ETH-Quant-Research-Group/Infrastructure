@@ -344,6 +344,12 @@ class Handler(BaseHTTPRequestHandler):
                 if val:
                     run_cmd += ["-e", f"{key}={val}"]
             run_cmd += ["-e", f"TRADING_MODE={mode}"]
+            # Ties the strategy's own NATS identity to the deploy name the
+            # admin chose here, so the consolidator's guard config (which is
+            # keyed by this same name, see StrategyGuardRegistry) always
+            # lines up with whatever strategy_id this container actually
+            # publishes under — see workers/strategy_worker.py.
+            run_cmd += ["-e", f"STRATEGY_ID={name}"]
             for key, val in env.items():
                 run_cmd += ["-e", f"{key}={val}"]
             run_cmd.append(image)

@@ -241,7 +241,13 @@ async def main() -> None:
     strategy_cls = _load_strategy(strategy_name)
     log.info("loaded strategy %s", strategy_cls.__name__)
 
-    strategy_id = strategy_cls.__name__
+    # STRATEGY_ID (set by manager/deploy_server.py at deploy time, matching
+    # the admin-chosen deploy name) takes priority over the class name so
+    # the consolidator's guard config — keyed by that same deploy name — is
+    # guaranteed to line up with whatever this worker actually publishes
+    # under. Falls back to the class name for compose-managed strategies,
+    # which don't go through the /internal deploy flow.
+    strategy_id = os.environ.get("STRATEGY_ID", "").strip() or strategy_cls.__name__
     bus = NatsBus()
     target_queue: asyncio.Queue[TargetPosition] = asyncio.Queue()
     guard = StrategyGuard(max_loss=_resolve_max_loss(strategy_cls))
