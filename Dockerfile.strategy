@@ -7,10 +7,16 @@
 # clients directly) and no webapp/persistence.py (only consolidator needs
 # DB access) — a standalone strategy container needs neither.
 #
-# Build:
-#   docker build -f Dockerfile.strategy \
+# Build (use buildx with an explicit --platform, not plain `docker build` —
+# a plain build only targets whatever architecture you're building ON,
+# which silently produces an arm64-only image on Apple Silicon that then
+# fails with "exec format error" on an amd64 deploy host. --push is
+# required for multi-platform builds; they can't be --load-ed locally):
+#   docker buildx build -f Dockerfile.strategy \
+#     --platform linux/amd64,linux/arm64 \
 #     --build-arg STRATEGY_NAME=FundingArbBybitStrategy \
-#     -t ghcr.io/eth-quant-research-group/funding-arb-bybit:latest .
+#     -t ghcr.io/eth-quant-research-group/funding-arb-bybit:latest \
+#     --push .
 
 FROM python:3.11-slim
 
