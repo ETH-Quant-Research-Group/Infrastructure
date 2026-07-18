@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTheme, th } from '../theme'
+import { fetchGated } from '../utils/auth'
 
 function StatusDot({ state }) {
   const color = state === 'running' ? 'bg-emerald-400'
@@ -70,7 +71,8 @@ export default function Status() {
     let stopped = false
     async function fetchStatus() {
       try {
-        const res = await fetch('/api/ops/status')
+        const res = await fetchGated('/api/ops/status')
+        if (!res.ok) throw new Error(`status ${res.status}`)
         const data = await res.json()
         if (!stopped) {
           setServices(data.services ?? [])

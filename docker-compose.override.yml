@@ -11,14 +11,10 @@
 #   docker compose -f docker-compose.yml up -d
 #
 # Do that on any real deployment (Raspberry Pi, wherever qrfzurich.com
-# actually points). Only the two keys below differ from docker-compose.yml;
+# actually points). Only the one key below differs from docker-compose.yml;
 # everything else is inherited as-is.
 
 services:
-  webapp:
-    environment:
-      DEV_MODE: "1"
-
   oauth2-proxy:
     environment:
       OAUTH2_PROXY_SKIP_AUTH_REGEX: "^/"

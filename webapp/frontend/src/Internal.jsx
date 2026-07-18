@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import Deploy from './subpage/Deploy'
 import Status from './subpage-internal/Status'
@@ -7,6 +7,7 @@ import ThemeToggle from './ThemeToggle'
 import logoDark from './assets/QRFLogo.png'
 import logoLight from './assets/QRF_light.png'
 import { useTheme, th } from './theme'
+import { fetchGated } from './utils/auth'
 
 const TAB_NAMES = ['Status', 'Logs', 'Deploy']
 
@@ -21,10 +22,33 @@ export default function Internal({ onToggleTheme }) {
   const c = th(isDark)
   const [tab, setTab] = useState('Status')
   const [logsTarget, setLogsTarget] = useState('')
+  // /internal is a client-side route, so it renders before any request has
+  // even asked the server whether we're logged in. Gate rendering behind
+  // one cheap authed request first, so nobody sees the tab UI (even empty)
+  // without a session — fetchGated navigates away to GitHub login itself
+  // if there isn't one.
+  const [access, setAccess] = useState('checking') // 'checking' | 'ok' | 'error'
+
+  useEffect(() => {
+    let cancelled = false
+    fetchGated('/api/ops/status')
+      .then(res => { if (!cancelled) setAccess(res.ok ? 'ok' : 'error') })
+      .catch(() => { if (!cancelled) setAccess('error') })
+    return () => { cancelled = true }
+  }, [])
 
   function viewLogsFor(service) {
     setLogsTarget(service)
     setTab('Logs')
+  }
+
+  if (access === 'checking') return null
+  if (access === 'error') {
+    return (
+      <div className={`flex items-center justify-center min-h-screen ${c.bg} ${c.t3} text-sm font-mono`}>
+        Could not verify access — try reloading.
+      </div>
+    )
   }
 
   return (
