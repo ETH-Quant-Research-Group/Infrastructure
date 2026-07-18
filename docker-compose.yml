@@ -83,12 +83,8 @@ services:
     networks: [app]
     environment:
       <<: *worker-env
-      API_TOKEN: ${API_TOKEN:-}
       GITHUB_ORG: ${GITHUB_ORG:-ETH-Quant-Research-Group}
       GITHUB_PACKAGES_TOKEN: ${GITHUB_PACKAGES_TOKEN:-}
-      # Real (production) default: auth enforced. Local dev flips this via
-      # docker-compose.override.yml, not by editing this file.
-      DEV_MODE: ${DEV_MODE:-0}
     volumes:
       - webapp_data:/root/.qrf
     depends_on:

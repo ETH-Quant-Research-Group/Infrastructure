@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTheme, th } from '../theme'
+import { fetchGated } from '../utils/auth'
 
 const MAX_LINES = 1000
 const LEVELS = ['ERROR', 'WARNING', 'INFO', 'DEBUG']
@@ -62,8 +63,8 @@ export default function Logs({ initialService = '' }) {
   const [activeLevels, setActiveLevels] = useState(() => new Set())
 
   useEffect(() => {
-    fetch('/api/ops/status')
-      .then(r => r.json())
+    fetchGated('/api/ops/status')
+      .then(r => { if (!r.ok) throw new Error(`status ${r.status}`); return r.json() })
       .then(data => {
         const names = [...new Set((data.services ?? []).map(s => s.name))]
         setServices(names)

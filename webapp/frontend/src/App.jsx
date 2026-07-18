@@ -5,11 +5,9 @@ import Dashboard from './Dashboard'
 import StrategyDetail from './StrategyDetail'
 import Internal from './Internal'
 import { ThemeContext } from './theme'
-import { ApiTokenContext, useApiTokenState } from './apiToken'
 
 export default function App() {
   const [isDark, setIsDark] = useState(true)
-  const apiTokenState = useApiTokenState()
 
   useEffect(() => {
     document.documentElement.classList.toggle('light', !isDark)
@@ -19,14 +17,12 @@ export default function App() {
 
   return (
     <ThemeContext.Provider value={isDark}>
-      <ApiTokenContext.Provider value={apiTokenState}>
-        <Routes>
-          <Route path="/" element={<Landing onToggleTheme={toggleTheme} />} />
-          <Route path="/strategy/:strategyId" element={<StrategyDetail onToggleTheme={toggleTheme} />} />
-          <Route path="/internal" element={<Internal onToggleTheme={toggleTheme} />} />
-          <Route path="/*" element={<Dashboard onToggleTheme={toggleTheme} />} />
-        </Routes>
-      </ApiTokenContext.Provider>
+      <Routes>
+        <Route path="/" element={<Landing onToggleTheme={toggleTheme} />} />
+        <Route path="/strategy/:strategyId" element={<StrategyDetail onToggleTheme={toggleTheme} />} />
+        <Route path="/internal" element={<Internal onToggleTheme={toggleTheme} />} />
+        <Route path="/*" element={<Dashboard onToggleTheme={toggleTheme} />} />
+      </Routes>
     </ThemeContext.Provider>
   )
 }
