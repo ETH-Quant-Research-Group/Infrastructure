@@ -6,6 +6,30 @@ import { fmtUTC } from '../utils/format'
 const API_BASE = '/api/performance'
 const POLL_MS = 30000
 
+function fmt(v) {
+  const n = parseFloat(v)
+  if (isNaN(n)) return '—'
+  const sign = n < 0 ? '-' : n > 0 ? '+' : ''
+  return `${sign}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function pnlColor(v) {
+  const n = parseFloat(v)
+  if (isNaN(n) || n === 0) return 'text-zinc-400'
+  return n > 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
+}
+
+function Kicker({ label }) {
+  const isDark = useTheme()
+  const c = th(isDark)
+  return (
+    <div className="flex items-center gap-2.5">
+      <span className={`inline-block w-6 h-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300'}`} />
+      <span className={`text-xs font-medium uppercase tracking-[0.25em] ${c.t4}`}>{label}</span>
+    </div>
+  )
+}
+
 function PnLChart({ data }) {
   const containerRef = useRef(null)
   const isDark = useTheme()
@@ -21,38 +45,30 @@ function PnLChart({ data }) {
         textColor: c.chartText,
         fontFamily: 'Inter, system-ui, sans-serif',
         fontSize: 11,
+        attributionLogo: false,
       },
-      grid: {
-        vertLines: { color: c.chartGrid },
-        horzLines: { color: c.chartGrid },
-      },
+      grid: { vertLines: { visible: false }, horzLines: { color: c.chartGrid } },
       crosshair: {
         mode: 1,
         vertLine: { color: c.chartXhair, labelBackgroundColor: c.chartLabel },
-        horzLine: { color: c.chartXhair, labelBackgroundColor: c.chartLabel },
+        horzLine: { visible: false, labelVisible: false },
       },
-      rightPriceScale: { borderColor: c.chartBorder, scaleMargins: { top: 0.15, bottom: 0.15 } },
-      timeScale: { borderColor: c.chartBorder, timeVisible: true },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.15, bottom: 0.15 } },
+      timeScale: { borderVisible: false, timeVisible: true },
       width: el.clientWidth,
       height: 280,
     })
 
-    const totalSeries = chart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 2, title: 'Total PnL' })
+    const totalSeries = chart.addSeries(LineSeries, { color: '#26a69a', lineWidth: 2, title: 'Total PnL', lastValueVisible: false, priceLineVisible: false })
     totalSeries.setData([...data.total].sort((a, b) => a.time - b.time))
 
-    const realizedSeries = chart.addSeries(LineSeries, {
-      color: '#7b8cde',
-      lineWidth: 1,
-      lineStyle: 2,
-      title: 'Funding Income',
-    })
+    const realizedSeries = chart.addSeries(LineSeries, { color: '#7b8cde', lineWidth: 1, lineStyle: 2, title: 'Funding Income', lastValueVisible: false, priceLineVisible: false })
     realizedSeries.setData([...data.realized].sort((a, b) => a.time - b.time))
 
     chart.timeScale().fitContent()
 
     const observer = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }))
     observer.observe(el)
-
     return () => { observer.disconnect(); chart.remove() }
   }, [data, isDark])
 
@@ -69,19 +85,6 @@ function toChartPoints(history, field) {
   return Object.entries(bySecond)
     .map(([t, v]) => ({ time: Number(t), value: v }))
     .sort((a, b) => a.time - b.time)
-}
-
-function fmt(v) {
-  const n = parseFloat(v)
-  if (isNaN(n)) return '—'
-  const sign = n < 0 ? '-' : n > 0 ? '+' : ''
-  return `${sign}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
-
-function pnlColor(v) {
-  const n = parseFloat(v)
-  if (isNaN(n) || n === 0) return 'text-zinc-400'
-  return n > 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'
 }
 
 function StrategyFills({ strategyId }) {
@@ -104,35 +107,35 @@ function StrategyFills({ strategyId }) {
   }, [strategyId])
 
   return (
-    <div className="flex flex-col h-full">
-      <p className={`${c.t1} font-bold font-notion-inter mb-3 text-lg`}>Fills</p>
+    <div className="flex flex-col h-full gap-4">
+      <Kicker label="Fills" />
       <div className="overflow-y-auto flex-1">
         {fills.length === 0 ? (
-          <p className={`${c.t5} text-xs`}>No fills yet.</p>
+          <p className={`${c.t5} text-xs pt-4`}>No fills yet.</p>
         ) : (
-          <div className={`flex flex-col ${c.divide} divide-y`}>
+          <div className="flex flex-col">
             {fills.map((f, i) => {
               const qty = parseFloat(f.quantity)
               const isBuy = qty > 0
               return (
                 <div
                   key={i}
-                  className={`grid py-3 px-2 ${c.hover} transition-colors rounded font-notion-inter`}
+                  className={`grid py-3 border-b ${c.b1} last:border-0`}
                   style={{ gridTemplateColumns: '1fr auto auto' }}
                 >
-                  <div className="flex flex-col gap-1">
-                    <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{f.symbol}</span>
+                  <div className="flex flex-col gap-0.5">
+                    <span className={`text-sm font-medium ${c.t1} leading-tight`}>{f.symbol}</span>
                     <span className={`text-[11px] font-mono ${c.t4} leading-tight tabular-nums`}>{fmtUTC(f.filled_at)}</span>
                   </div>
-                  <div className="flex flex-col items-end gap-1 pr-3">
-                    <span className={`text-[13px] font-medium leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
+                  <div className="flex flex-col items-end gap-0.5 pr-3">
+                    <span className={`text-xs font-semibold leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
                       {isBuy ? 'BUY' : 'SELL'}
                     </span>
-                    <span className={`text-[11px] ${c.t3} leading-tight`}>{f.exchange || 'fill'}</span>
+                    <span className={`text-[11px] ${c.t4} leading-tight`}>{f.exchange || '—'}</span>
                   </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{Math.abs(qty)}</span>
-                    <span className={`text-[11px] ${c.t4} leading-tight`}>
+                  <div className="flex flex-col items-end gap-0.5">
+                    <span className={`text-sm font-medium ${c.t1} leading-tight tabular-nums`}>{Math.abs(qty)}</span>
+                    <span className={`text-[11px] font-mono ${c.t4} leading-tight tabular-nums`}>
                       {f.fill_price === '0' ? 'MKT' : parseFloat(f.fill_price).toLocaleString('en-US', { maximumFractionDigits: 4 })}
                     </span>
                   </div>
@@ -164,7 +167,7 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
       try {
         const res = await fetch(`${API_BASE}/metrics`)
         if (res.ok) setRiskMetrics(await res.json())
-      } catch {}
+      } catch { }
     }
     fetchMetrics()
     const id = setInterval(fetchMetrics, POLL_MS)
@@ -172,13 +175,11 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
   }, [])
 
   useEffect(() => {
-    // Funding-vs-fees is cached server-side for 1h; poll every 5 min so a
-    // fresh result appears soon after the cache expires.
     async function fetchFundingFees() {
       try {
         const res = await fetch(`${API_BASE}/funding-vs-fees?symbols=ETHUSDT,LINKUSDT&lookback_hours=720`)
         if (res.ok) setFundingFees(await res.json())
-      } catch {}
+      } catch { }
     }
     fetchFundingFees()
     const id = setInterval(fetchFundingFees, 5 * 60 * 1000)
@@ -233,123 +234,126 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
     return () => clearInterval(id)
   }, [selected])
 
-  const metrics = latest
-    ? [
-      { label: 'Total PnL', value: latest.total },
-      { label: 'Funding Income', value: latest.total_realized },
-      { label: 'MTM Net', value: latest.total_unrealized },
-    ]
-    : []
-
   const hasChart = chartData.total.length >= 2
 
+  const pnlStats = latest ? [
+    { label: 'Total PnL', value: fmt(latest.total), color: pnlColor(latest.total) },
+    { label: 'Funding Income', value: fmt(latest.total_realized), color: pnlColor(latest.total_realized), sub: 'realized' },
+    { label: 'MTM Net', value: fmt(latest.total_unrealized), color: pnlColor(latest.total_unrealized), sub: 'unrealized' },
+  ] : []
+
+  const riskStats = riskMetrics ? [
+    {
+      label: 'Total Return',
+      value: riskMetrics.total_return !== null && riskMetrics.total_return !== undefined
+        ? `${(riskMetrics.total_return * 100).toFixed(3)}%` : '—',
+      color: pnlColor(riskMetrics.total_return ?? 0),
+    },
+    {
+      label: 'Sharpe Ratio',
+      value: riskMetrics.sharpe_ratio !== null && riskMetrics.sharpe_ratio !== undefined
+        ? riskMetrics.sharpe_ratio.toFixed(2) : '—',
+    },
+    {
+      label: 'Max Drawdown',
+      value: riskMetrics.max_drawdown !== null && riskMetrics.max_drawdown !== undefined
+        ? `${(riskMetrics.max_drawdown * 100).toFixed(3)}%` : '—',
+      color: riskMetrics.max_drawdown ? 'text-[#ef5350]' : undefined,
+    },
+    {
+      label: 'Win Rate',
+      value: riskMetrics.win_rate !== null && riskMetrics.win_rate !== undefined
+        ? `${(riskMetrics.win_rate * 100).toFixed(1)}%` : '—',
+    },
+  ] : []
+
   return (
-    <div className="flex gap-6 h-100">
+    <div className="flex gap-8 h-full">
       {/* Left: chart + metrics */}
-      <div className="flex-1 min-w-0 flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <h3 className={`${c.t1} font-semibold text-lg`}>{lockedName ?? selected ?? '—'}</h3>
-          {!lockedId && strategies.length > 0 && (
-            <div className={`flex gap-1 ${c.togBg} rounded-md p-1`}>
-              {strategies.map(s => (
-                <button
-                  key={s.strategy_id}
-                  onClick={() => setSelected(s.strategy_id)}
-                  className={`px-3 py-1 rounded text-xs font-medium transition-colors border-0 cursor-pointer ${selected === s.strategy_id ? c.togA : c.togI}`}
-                >
-                  {s.strategy_id}
-                </button>
-              ))}
-            </div>
-          )}
+      <div className="flex-1 min-w-0 flex flex-col gap-10">
+
+        {/* Strategy selector */}
+        <div className="flex flex-col gap-4">
+          <Kicker label="Strategy" />
+          <div className="flex items-end justify-between">
+            <h3 className={`font-serif ${c.t1} font-medium text-2xl md:text-3xl leading-[1.1]`}>
+              {lockedName ?? selected ?? '—'}
+            </h3>
+            {!lockedId && strategies.length > 1 && (
+              <div className="flex gap-4">
+                {strategies.map(s => (
+                  <button
+                    key={s.strategy_id}
+                    onClick={() => setSelected(s.strategy_id)}
+                    className={`text-xs font-mono pb-0.5 transition-colors border-0 bg-transparent cursor-pointer ${
+                      selected === s.strategy_id
+                        ? `${c.t1} border-b border-current`
+                        : `${c.t4} hover:${isDark ? 'text-zinc-300' : 'text-zinc-600'}`
+                    }`}
+                  >
+                    {s.strategy_id}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
-        {metrics.length > 0 && (
-          <div className="grid grid-cols-3 gap-3">
-            {metrics.map(m => (
-              <div key={m.label} className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
-                <p className={`${c.t3} text-xs mb-1`}>{m.label}</p>
-                <p className={`text-base font-semibold font-mono ${pnlColor(m.value)}`}>{fmt(m.value)}</p>
+        {/* PnL numbers */}
+        {pnlStats.length > 0 && (
+          <div className={`border-t ${c.b1} pt-8 grid grid-cols-3 gap-x-8 gap-y-6`}>
+            {pnlStats.map(s => (
+              <div key={s.label} className="flex flex-col gap-1.5">
+                <p className={`text-[11px] font-medium uppercase tracking-[0.15em] ${c.t3}`}>{s.label}</p>
+                <p className={`font-serif text-3xl font-medium tabular-nums leading-none ${s.color ?? c.t1}`}>{s.value}</p>
+                {s.sub && <p className={`text-[11px] ${c.t4}`}>{s.sub}</p>}
               </div>
             ))}
           </div>
         )}
 
-        {riskMetrics && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
-              <p className={`${c.t3} text-xs mb-1`}>Total Return</p>
-              <p className={`text-base font-semibold font-mono ${pnlColor(riskMetrics.total_return ?? 0)}`}>
-                {riskMetrics.total_return !== null && riskMetrics.total_return !== undefined
-                  ? `${(riskMetrics.total_return * 100).toFixed(3)}%`
-                  : '—'}
-              </p>
-            </div>
-            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
-              <p className={`${c.t3} text-xs mb-1`}>Sharpe Ratio</p>
-              <p className={`text-base font-semibold font-mono ${c.t1}`}>
-                {riskMetrics.sharpe_ratio !== null && riskMetrics.sharpe_ratio !== undefined
-                  ? riskMetrics.sharpe_ratio.toFixed(2)
-                  : '—'}
-              </p>
-            </div>
-            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
-              <p className={`${c.t3} text-xs mb-1`}>Max Drawdown</p>
-              <p className={`text-base font-semibold font-mono ${riskMetrics.max_drawdown ? 'text-[#ef5350]' : c.t1}`}>
-                {riskMetrics.max_drawdown !== null && riskMetrics.max_drawdown !== undefined
-                  ? `${(riskMetrics.max_drawdown * 100).toFixed(3)}%`
-                  : '—'}
-              </p>
-            </div>
-            <div className={`${c.innerCard} rounded-lg p-3 border ${c.b1}`}>
-              <p className={`${c.t3} text-xs mb-1`}>Win Rate</p>
-              <p className={`text-base font-semibold font-mono ${c.t1}`}>
-                {riskMetrics.win_rate !== null && riskMetrics.win_rate !== undefined
-                  ? `${(riskMetrics.win_rate * 100).toFixed(1)}%`
-                  : '—'}
-              </p>
+        {/* Risk metrics */}
+        {riskStats.length > 0 && (
+          <div className={`border-t ${c.b1} pt-8 flex flex-col gap-6`}>
+            <Kicker label="Risk Metrics" />
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-6">
+              {riskStats.map(s => (
+                <div key={s.label} className="flex flex-col gap-1.5">
+                  <p className={`text-[11px] font-medium uppercase tracking-[0.15em] ${c.t3}`}>{s.label}</p>
+                  <p className={`font-serif text-2xl font-medium tabular-nums leading-none ${s.color ?? c.t1}`}>{s.value}</p>
+                </div>
+              ))}
             </div>
           </div>
         )}
 
+        {/* Funding vs fees */}
         {fundingFees && (
-          <div className={`${c.innerCard} rounded-lg p-4 border ${c.b1}`}>
-            <div className="flex items-baseline justify-between mb-3">
-              <p className={`${c.t1} text-sm font-semibold`}>Funding income vs trading fees</p>
-              <p className={`${c.t5} text-[10px] font-mono`}>
+          <div className={`border-t ${c.b1} pt-8 flex flex-col gap-6`}>
+            <div className="flex items-center justify-between">
+              <Kicker label="Funding Income vs Fees" />
+              <span className={`${c.t5} text-[10px] font-mono`}>
                 last {fundingFees.lookback_hours}h · cached {fundingFees.cache_age_s ?? 0}s
-              </p>
+              </span>
             </div>
-            <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
-              <div>
-                <p className={`${c.t3} text-xs mb-1`}>Funding collected</p>
-                <p className={`text-base font-semibold font-mono ${pnlColor(fundingFees.totals.funding)}`}>
-                  {fmt(fundingFees.totals.funding)}
-                </p>
-              </div>
-              <div>
-                <p className={`${c.t3} text-xs mb-1`}>Fees paid</p>
-                <p className={`text-base font-semibold font-mono ${pnlColor(fundingFees.totals.fees)}`}>
-                  {fmt(fundingFees.totals.fees)}
-                </p>
-              </div>
-              <div>
-                <p className={`${c.t3} text-xs mb-1`}>Net</p>
-                <p className={`text-base font-semibold font-mono ${pnlColor(fundingFees.totals.net)}`}>
-                  {fmt(fundingFees.totals.net)}
-                </p>
-              </div>
-              <div className="hidden md:block">
-                <p className={`${c.t3} text-xs mb-1`}>Pulled at</p>
-                <p className={`text-[11px] font-mono ${c.t4} tabular-nums`}>{fmtUTC(fundingFees.fetched_at)}</p>
-              </div>
+            <div className="grid grid-cols-3 gap-x-8 gap-y-6">
+              {[
+                { label: 'Funding collected', value: fundingFees.totals.funding },
+                { label: 'Fees paid', value: fundingFees.totals.fees },
+                { label: 'Net', value: fundingFees.totals.net },
+              ].map(({ label, value }) => (
+                <div key={label} className="flex flex-col gap-1.5">
+                  <p className={`text-[11px] font-medium uppercase tracking-[0.15em] ${c.t3}`}>{label}</p>
+                  <p className={`font-serif text-2xl font-medium tabular-nums leading-none ${pnlColor(value)}`}>{fmt(value)}</p>
+                </div>
+              ))}
             </div>
             {fundingFees.per_symbol && Object.keys(fundingFees.per_symbol).length > 0 && (
-              <div className={`mt-3 pt-3 border-t ${c.b1} grid grid-cols-1 md:grid-cols-2 gap-2`}>
+              <div className={`pt-4 border-t ${c.b1} flex flex-col`}>
                 {Object.entries(fundingFees.per_symbol).map(([sym, v]) => (
-                  <div key={sym} className="flex items-baseline justify-between text-xs">
-                    <span className={`${c.t2} font-medium`}>{sym}</span>
-                    <span className={`font-mono tabular-nums ${c.t4}`}>
+                  <div key={sym} className={`flex items-baseline justify-between py-2.5 border-b ${c.b1} last:border-0`}>
+                    <span className={`text-sm font-mono font-medium ${c.t2}`}>{sym}</span>
+                    <span className={`text-xs font-mono tabular-nums ${c.t4}`}>
                       funding <span className={pnlColor(v.funding)}>{fmt(v.funding)}</span>
                       {' · '}fees <span className={pnlColor(v.fees)}>{fmt(v.fees)}</span>
                       {' · '}net <span className={pnlColor(v.net)}>{fmt(v.net)}</span>
@@ -361,7 +365,17 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
           </div>
         )}
 
-        <div className="rounded-lg overflow-hidden">
+        {/* PnL chart */}
+        <div className={`border-t ${c.b1} pt-8 flex flex-col gap-5`}>
+          <div className="flex items-center justify-between">
+            <Kicker label="PnL History" />
+            {hasChart && (
+              <div className={`flex gap-5 text-[10px] font-mono ${c.t4}`}>
+                <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-px bg-[#26a69a]" /> Total PnL</span>
+                <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-px bg-[#7b8cde] opacity-70" /> Funding</span>
+              </div>
+            )}
+          </div>
           {error ? (
             <div className={`flex items-center justify-center h-40 ${c.t4} text-sm`}>{error}</div>
           ) : !selected ? (
@@ -374,21 +388,10 @@ export default function StrategyPerformance({ strategyId: lockedId, displayName:
             <PnLChart data={chartData} />
           )}
         </div>
-
-        {hasChart && (
-          <div className={`flex gap-4 text-xs ${c.t3}`}>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block w-4 h-0.5 bg-[#26a69a]" /> Total PnL
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block w-4 h-0.5 bg-[#7b8cde] opacity-70" /> Funding Income
-            </span>
-          </div>
-        )}
       </div>
 
       {/* Right: fills panel */}
-      <div className={`w-72 shrink-0 border-l ${c.b1} pl-6 overflow-scroll`}>
+      <div className={`w-64 shrink-0 border-l ${c.b1} pl-6 overflow-y-auto`}>
         <StrategyFills strategyId={selected} />
       </div>
     </div>

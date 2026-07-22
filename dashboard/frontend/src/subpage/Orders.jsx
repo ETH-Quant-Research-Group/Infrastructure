@@ -12,54 +12,61 @@ export default function Orders() {
 
   useEffect(() => {
     let cancelled = false
-
     async function fetch_orders() {
       try {
         const res = await fetch('/api/orders/')
         const data = await res.json()
-        if (!cancelled) {
-          setHistory(data.orders)
-          setError(null)
-        }
+        if (!cancelled) { setHistory(data.orders); setError(null) }
       } catch {
         if (!cancelled) setError('API unreachable')
       }
     }
-
     fetch_orders()
     const id = setInterval(fetch_orders, POLL_MS)
     return () => { cancelled = true; clearInterval(id) }
   }, [])
 
   return (
-    <div className="flex flex-col h-full">
-      <p className={`${c.t1} font-bold font-notion-inter my-3 text-2xl md:text-[32px] leading-[1.1]`}>Orders</p>
-      {error && <p className="text-red-500 text-[11px] mb-2">{error}</p>}
+    <div className="flex flex-col gap-5">
+      <div className="flex items-center gap-2.5">
+        <span className={`inline-block w-6 h-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300'}`} />
+        <span className={`text-xs font-medium uppercase tracking-[0.25em] ${c.t4}`}>Order Flow</span>
+        {history.length > 0 && (
+          <span className={`ml-auto text-[10px] font-mono ${c.t5}`}>{history.length} orders</span>
+        )}
+      </div>
 
-      <div className="overflow-y-auto h-140">
+      {error && <p className={`text-[11px] font-mono text-red-500`}>{error}</p>}
+
+      <div className="min-h-[120px]">
         {history.length === 0 ? (
-          <p className={`${c.t5} text-xs`}>No orders.</p>
+          <p className={`${c.t5} text-xs pt-2`}>No orders yet.</p>
         ) : (
-          <div className={`flex flex-col ${c.divide} divide-y`}>
+          <div className="flex flex-col">
             {history.map((o, i) => {
               const isBuy = o.side === 'buy'
+              const isMkt = o.price === '0' || o.price === 0
               return (
-                <div key={i} className={`grid py-3 ${c.hover} transition-colors px-2 rounded font-notion-inter`}
-                  style={{ gridTemplateColumns: '1fr auto auto' }}>
-                  <div className="flex flex-col gap-1">
-                    <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{o.symbol}</span>
-                    <span className={`text-[11px] font-mono ${c.t4} leading-tight tabular-nums`}>{fmtUTC(o.placed_at)}</span>
-                    {o.exchange && <span className={`text-[10px] ${c.t5} leading-tight font-mono`}>{o.exchange}</span>}
+                <div key={i} className={`flex items-start gap-3 py-3 border-b ${c.b1} last:border-0`}>
+                  {/* Side badge */}
+                  <span className={`text-[10px] font-mono font-semibold tracking-wider pt-0.5 shrink-0 w-8 ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {isBuy ? 'BUY' : 'SELL'}
+                  </span>
+
+                  {/* Symbol + meta */}
+                  <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                    <span className={`text-sm font-mono font-medium ${c.t1} leading-tight`}>{o.symbol}</span>
+                    <div className={`flex gap-2 text-[10px] font-mono ${c.t4}`}>
+                      {o.exchange && <span>{o.exchange}</span>}
+                      {o.strategy_id && <span className={c.t5}>{o.strategy_id}</span>}
+                    </div>
+                    <span className={`text-[10px] font-mono tabular-nums ${c.t5}`}>{fmtUTC(o.placed_at)}</span>
                   </div>
-                  <div className="flex flex-col items-end gap-1 pr-3">
-                    <span className={`text-[13px] font-medium leading-tight ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {o.side.toUpperCase()}
-                    </span>
-                    <span className={`text-[11px] font-medium ${c.t3} leading-tight`}>{o.order_type}</span>
-                  </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <span className={`text-[14px] font-medium ${c.t1} leading-tight`}>{o.quantity}</span>
-                    <span className={`text-[11px] font-medium ${c.t4} leading-tight`}>{o.price === '0' ? 'MKT' : o.price}</span>
+
+                  {/* Qty + price */}
+                  <div className="text-right shrink-0 flex flex-col gap-0.5">
+                    <span className={`text-sm font-mono font-medium ${c.t1} leading-tight tabular-nums`}>{o.quantity}</span>
+                    <span className={`text-[10px] font-mono tabular-nums ${c.t4}`}>{isMkt ? 'MKT' : Number(o.price).toLocaleString('en-US', { maximumFractionDigits: 4 })}</span>
                   </div>
                 </div>
               )

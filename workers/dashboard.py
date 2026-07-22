@@ -74,7 +74,12 @@ async def _startup() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     nc: nats.aio.client.Client = app.state.nc
-    await nc.drain()
+    try:
+        await nc.drain()
+    except nats.errors.ConnectionReconnectingError:
+        # NATS server went away before we did (e.g. dev.sh teardown) — drain()
+        # requires an active connection, so just force-close instead.
+        await nc.close()
     if hasattr(app.state, "db"):
         app.state.db.close()
     log.info("Dashboard shutdown — NATS drained")

@@ -1,12 +1,17 @@
 @import "tailwindcss";
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@theme {
+  --font-serif: 'Source Serif 4', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+}
 
 @layer base {
   html, body {
     background: #0f0f0f;
     color: #d1d4dc;
     min-height: 100vh;
+    font-family: 'Inter', -apple-system, "system-ui", "Segoe UI", Helvetica, Arial, sans-serif;
+    font-feature-settings: "cv01", "cv02", "cv09";
     -webkit-font-smoothing: antialiased;
   }
   html.light, html.light body {
