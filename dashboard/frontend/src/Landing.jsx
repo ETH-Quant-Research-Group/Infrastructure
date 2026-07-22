@@ -3,6 +3,10 @@ import { Link } from 'react-router-dom'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import logoDark from './assets/QRFLogo.png'
 import logoLight from './assets/QRF_light.png'
+import aceLogoDark from './assets/ACELogoWhite.svg'
+import aceLogoLight from './assets/ACELogoBlack.svg'
+import profileBogdan from './assets/profile_BogdanOsdaczuk.jpeg'
+import profileCarlo from './assets/profile_CarloTeufel.jpeg'
 import heroZurich from './assets/hero-zurich.avif'
 import { useTheme, th } from './theme'
 import Header from './Header'
@@ -136,12 +140,12 @@ function Hero({ heroRef }) {
     <section ref={heroRef} className="relative min-h-screen flex flex-col items-center justify-center text-center gap-7 px-4 overflow-hidden">
       <HeroBackground />
       <div className="relative z-10 flex flex-col items-center gap-7">
-        <span className="text-xs font-mono uppercase tracking-[0.3em] text-zinc-300">Zurich · Systematic Trading</span>
+        <span className="text-xs font-mono uppercase tracking-[0.3em] text-zinc-300">ETH Zurich - Analytics Club</span>
         <h1 className="text-white font-extrabold uppercase text-5xl md:text-7xl leading-[1.05] max-w-4xl">
           QRF
         </h1>
         <p className="text-zinc-300 text-sm md:text-base uppercase tracking-[0.15em] max-w-xl">
-          Zurich's systematic delta-neutral investment fund
+          Student run Systematic Investment Fund at ETH Zurich
         </p>
         <a
           href="#performance"
@@ -238,6 +242,32 @@ function PerformanceSection() {
   )
 }
 
+function MissionSection() {
+  const isDark = useTheme()
+  const c = th(isDark)
+  return (
+    <section id="mission" className={`px-4 md:px-8 py-20 md:py-28 border-t ${c.b1} scroll-mt-20`}>
+      <div className="max-w-5xl mx-auto flex flex-col gap-14">
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className={`inline-block w-6 h-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300'}`} />
+            <span className={`text-xs font-medium uppercase tracking-[0.25em] ${c.t4}`}>Mission</span>
+          </div>
+          <h2 className={`font-serif ${c.t1} font-medium text-3xl md:text-[40px] leading-[1.1]`}>Our Mission</h2>
+        </div>
+        <p className={`${c.t3} text-sm md:text-base leading-relaxed max-w-3xl`}>
+          QRF is a student-run quantitative fund operating under the Analytics Club at ETH
+          Zurich, bringing together mathematics and engineering students to conduct applied
+          research and manage a real-money portfolio as a rigorous learning environment. We
+          build every layer of our infrastructure in-house and hold each strategy to full
+          academic rigour before it goes live. A non-profit initiative, QRF reinvests all
+          returns in furtherance of its educational mission.
+        </p>
+      </div>
+    </section>
+  )
+}
+
 function PartnersSection() {
   const isDark = useTheme()
   const c = th(isDark)
@@ -260,14 +290,45 @@ function PartnersSection() {
   )
 }
 
+const BOARD_MEMBERS = [
+  { name: 'Bogdan Osadczuk', role: 'Cofounder, Fund Director', photo: profileBogdan },
+  { name: 'Carlo Teufel', role: 'Cofounder, Head of Risk', photo: profileCarlo },
+]
+
+function BoardSection() {
+  const isDark = useTheme()
+  const c = th(isDark)
+  return (
+    <section id="board" className={`px-4 md:px-8 py-16 md:py-20 border-t ${c.b1} scroll-mt-20`}>
+      <div className="max-w-5xl mx-auto flex flex-col gap-8">
+        <h2 className={`font-serif ${c.t1} font-medium text-3xl md:text-[40px] leading-[1.1]`}>Board</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl">
+          {BOARD_MEMBERS.map(m => (
+            <div
+              key={m.name}
+              className={`rounded-lg border ${c.b1} ${c.cardAlt} flex flex-col gap-4 px-6 py-6`}
+            >
+              <img src={m.photo} alt={m.name} className="h-28 w-28 rounded-full object-cover" />
+              <div className="flex flex-col gap-1">
+                <span className={`${c.t1} font-serif text-xl font-medium`}>{m.name}</span>
+                <span className={`${c.t4} text-xs font-mono uppercase tracking-wider`}>{m.role}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function NewsSection() {
   const isDark = useTheme()
   const c = th(isDark)
   return (
     <section id="news" className={`px-4 md:px-8 py-16 md:py-20 border-t ${c.b1} scroll-mt-20`}>
-      <div className="max-w-3xl mx-auto flex flex-col gap-8">
+      <div className="max-w-5xl mx-auto flex flex-col gap-8">
         <h2 className={`font-serif ${c.t1} font-medium text-3xl md:text-[40px] leading-[1.1]`}>News</h2>
-        <div className={`flex flex-col ${c.divide} divide-y`}>
+        <div className={`flex flex-col ${c.divide} divide-y max-w-3xl`}>
           {PLACEHOLDER_NEWS.map(n => (
             <div key={n.title} className="py-5 flex flex-col gap-1.5">
               <span className={`${c.t4} text-xs font-mono`}>{n.date}</span>
@@ -286,11 +347,14 @@ function Footer() {
   const c = th(isDark)
   return (
     <footer className={`px-4 md:px-8 py-10 border-t ${c.b1} flex flex-col sm:flex-row items-center justify-between gap-4`}>
-      <img src={isDark ? logoDark : logoLight} alt="QRF" className="h-6 w-auto object-contain opacity-70" />
+      <div className="flex items-center gap-4">
+        <img src={isDark ? logoDark : logoLight} alt="QRF" className="h-9 w-auto object-contain opacity-70" />
+        <img src={isDark ? aceLogoDark : aceLogoLight} alt="ACE" className="h-6 w-auto object-contain opacity-70" />
+      </div>
       <p className={`${c.t4} text-xs font-mono`}>© {new Date().getFullYear()} QRF · Zurich</p>
       <div className="flex items-center gap-4">
         <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer" className={`${c.t4} text-[11px] hover:text-white no-underline`}>Charts by TradingView</a>
-        <a href="mailto:contact@qrfzurich.com" className={`${c.t3} text-xs hover:text-white no-underline`}>contact@qrfzurich.com</a>
+        <a href="mailto:qrf@analytics-club.org" className={`${c.t3} text-xs hover:text-white no-underline`}>qrf@analytics-club.org</a>
       </div>
     </footer>
   )
@@ -317,7 +381,9 @@ export default function Landing({ onToggleTheme }) {
       <Header onToggleTheme={onToggleTheme} overlay fadeHeight={fadeHeight} />
       <Hero heroRef={heroRef} />
       <PerformanceSection />
+      <MissionSection />
       <PartnersSection />
+      <BoardSection />
       <NewsSection />
       <Footer />
     </div>
