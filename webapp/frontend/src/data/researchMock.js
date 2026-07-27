@@ -20,55 +20,17 @@
 // being (precomputed grid lookup vs. a live backend call) — for now it just
 // runs client-side so the article/interactivity UI can be evaluated on its
 // own before that decision is made.
+//
+// compiledResearch.json is REAL compiled output from Research-Blog's
+// compiler/compile.py (run manually, output copied here — no CI/serving
+// pipeline yet, see project memory). It replaces what used to be a hand-
+// written "Derivatives Foundations" mock chapter; the two chapters below
+// (funding-rate-arbitrage, market-microstructure) are still illustrative
+// mock content, not yet backed by real notebooks.
+import compiledChapters from './compiledResearch.json'
 
 export const TOPICS = [
-  {
-    slug: 'derivatives-foundations',
-    title: 'Derivatives Foundations',
-    description: 'Start here — the vocabulary and mechanics everything else in this research builds on.',
-    articles: [
-      {
-        slug: 'intro-to-derivatives',
-        title: 'Intro to Derivatives',
-        date: '2026-05-10',
-        summary: 'What a derivative actually is, why it exists, and the handful of contract types (forwards, futures, perpetuals, options) everything else here assumes you know.',
-        blocks: [
-          {
-            type: 'text',
-            content: 'A derivative is a contract whose value is derived from something else — an underlying asset, rate, or index — rather than being that asset itself. You can get exposure to Bitcoin\'s price without holding Bitcoin, or to an interest rate without holding a bond.',
-          },
-          {
-            type: 'heading',
-            content: 'The four shapes that cover most of it',
-          },
-          {
-            type: 'text',
-            content: 'Forwards and futures both obligate two parties to transact at a set price on a future date — the difference is just standardization and daily settlement (futures) versus a private, one-off agreement (forwards). Perpetuals are futures with no expiry, kept tethered to spot via periodic funding payments instead. Options grant the right, not the obligation, to transact — which is what makes them worth a premium.',
-          },
-          {
-            type: 'text',
-            content: 'Everything in the Funding Rate Arbitrage and Market Microstructure chapters assumes this vocabulary — perpetual, basis, funding, participation rate — as given. Start here if any of that was unfamiliar.',
-          },
-        ],
-      },
-      {
-        slug: 'spot-futures-perpetuals',
-        title: 'Spot vs. Futures vs. Perpetuals',
-        date: '2026-05-17',
-        summary: 'Why the same asset can trade at three different prices at once, and what actually links them back together.',
-        blocks: [
-          {
-            type: 'text',
-            content: 'Spot is the asset itself, settled now. A futures contract trades at a premium or discount to spot depending on time-to-expiry, funding cost, and expectations — this gap is the "basis," and it mechanically converges to zero at expiry since the contract settles into the underlying.',
-          },
-          {
-            type: 'text',
-            content: 'Perpetuals have no expiry, so there\'s no settlement date to force convergence — instead, the funding rate (covered in depth in the next chapter) does that job continuously, paid between longs and shorts every few hours based on how far the perpetual has drifted from spot.',
-          },
-        ],
-      },
-    ],
-  },
+  ...compiledChapters,
   {
     slug: 'funding-rate-arbitrage',
     title: 'Funding Rate Arbitrage',
