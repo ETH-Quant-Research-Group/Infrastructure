@@ -7,31 +7,45 @@ import { COMPUTE, findArticle, findLooseArticle } from '../data/researchMock'
 function InteractiveBlock({ block }) {
   const isDark = useTheme()
   const c = th(isDark)
+  // Mock blocks recompute live via COMPUTE[id]. Compiled blocks (real
+  // notebooks, via Research-Blog's compiler) only carry one executed
+  // `sample` at default param values — no swept grid exists yet for a
+  // moved slider to look up, so those render as a static, disabled preview
+  // instead of pretending to be interactive.
+  const isLive = Boolean(COMPUTE[block.id])
   const [values, setValues] = useState(() =>
     Object.fromEntries(block.params.map(p => [p.key, p.default]))
   )
 
-  const data = useMemo(() => COMPUTE[block.id]?.(values) ?? [], [block.id, values])
+  const data = useMemo(() => {
+    if (isLive) return COMPUTE[block.id]?.(values) ?? []
+    const sample = block.sample ?? { x: [], y: [] }
+    return sample.x.map((x, i) => ({ x, y: sample.y[i] }))
+  }, [isLive, block.id, block.sample, values])
 
   return (
     <div className={`${c.card} border ${c.b1} rounded-xl p-5 md:p-6 flex flex-col gap-6`}>
-      <p className={`${c.t3} text-sm`}>{block.description}</p>
+      {block.description && <p className={`${c.t3} text-sm`}>{block.description}</p>}
+      {!isLive && (
+        <p className={`${c.t4} text-xs italic`}>Static preview, compiled from a real notebook — dragging doesn't recompute yet.</p>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-4">
         {block.params.map(p => (
           <label key={p.key} className="flex flex-col gap-1.5">
             <span className={`${c.t4} text-[11px] font-medium uppercase tracking-wider flex justify-between`}>
               <span>{p.label}</span>
-              <span className={`${c.t2} font-mono`}>{values[p.key]}</span>
+              <span className={`${c.t2} font-mono`}>{isLive ? values[p.key] : p.default}</span>
             </span>
             <input
               type="range"
               min={p.min}
               max={p.max}
               step={p.step}
-              value={values[p.key]}
+              value={isLive ? values[p.key] : p.default}
+              disabled={!isLive}
               onChange={e => setValues(v => ({ ...v, [p.key]: parseFloat(e.target.value) }))}
-              className="w-full accent-current"
+              className={`w-full accent-current ${isLive ? '' : 'opacity-50 cursor-not-allowed'}`}
             />
           </label>
         ))}
