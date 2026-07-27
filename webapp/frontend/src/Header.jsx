@@ -11,6 +11,7 @@ import InternalLink from './InternalLink'
 const NAV_LINKS = [
   { label: 'Home', to: '/' },
   { label: 'Performance', to: '/performance' },
+  { label: 'Research', to: '/research' },
   { label: 'Strategies', to: '/strategies' },
   { label: 'Assets', to: '/assets' },
   { label: 'Network', to: '/network' },
@@ -22,6 +23,7 @@ const TAB_LABELS = {
   strategies: 'Strategies',
   assets: 'Assets',
   network: 'Network',
+  research: 'Research',
 }
 
 // Only start solidifying once most of the hero photo has scrolled past,

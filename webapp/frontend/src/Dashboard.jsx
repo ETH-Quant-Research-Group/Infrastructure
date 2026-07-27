@@ -4,6 +4,9 @@ import { createChart, CandlestickSeries, LineSeries, LineStyle } from 'lightweig
 import Performance from './subpage/Performance'
 import Orders from './subpage/Orders'
 import Network from './subpage/Network'
+import Research from './subpage/Research'
+import ResearchTopic from './subpage/ResearchTopic'
+import ResearchArticle, { ResearchLooseArticle } from './subpage/ResearchArticle'
 import { useTheme, th } from './theme'
 import Header from './Header'
 
@@ -691,6 +694,10 @@ export default function Dashboard({ onToggleTheme }) {
           <Route path="strategies" element={<Strategies />} />
           <Route path="assets" element={<Assets />} />
           <Route path="network" element={<Network />} />
+          <Route path="research" element={<Research />} />
+          <Route path="research/loose/:article" element={<ResearchLooseArticle />} />
+          <Route path="research/:topic" element={<ResearchTopic />} />
+          <Route path="research/:topic/:article" element={<ResearchArticle />} />
           <Route path="*" element={<Navigate to="/performance" replace />} />
         </Routes>
       </main>
