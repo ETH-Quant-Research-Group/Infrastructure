@@ -70,11 +70,14 @@ async def _listen_fills(
     import nats.aio.msg as _nats_msg
 
     async def _cb(msg: _nats_msg.Msg) -> None:
-        fill = codec.decode_fill(msg.data)
-        # Track every leg by (symbol, exchange) so spot and perp unrealized
-        # offset correctly for delta-neutral strategies.
-        runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price, exchange=fill.exchange)
-        await runner.notify_fill(fill)
+        try:
+            fill = codec.decode_fill(msg.data)
+            # Track every leg by (symbol, exchange) so spot and perp unrealized
+            # offset correctly for delta-neutral strategies.
+            runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price, exchange=fill.exchange)
+            await runner.notify_fill(fill)
+        except Exception:
+            log.exception("fill handler failed for strategy %s", strategy_id)
 
     await nc.subscribe(f"fills.{strategy_id}", cb=_cb)
     await asyncio.get_running_loop().create_future()
@@ -320,3 +323,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("stopped")
+    except Exception:
+        log.exception("strategy_worker crashed with unhandled exception")
+        raise

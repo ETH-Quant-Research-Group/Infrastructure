@@ -53,8 +53,13 @@ class BybitSpotBroker(BaseBroker):
         *,
         demo: bool = bool(os.getenv("BYBIT_DEMO")),
     ) -> None:
-        self._api_key = api_key or os.environ["BYBIT_API_KEY"]
-        self._api_secret = api_secret or os.environ["BYBIT_API_SECRET"]
+        self._api_key = api_key or os.environ.get("BYBIT_API_KEY")
+        self._api_secret = api_secret or os.environ.get("BYBIT_API_SECRET")
+        if not self._api_key or not self._api_secret:
+            raise RuntimeError(
+                "BybitSpotBroker requires BYBIT_API_KEY and BYBIT_API_SECRET to be set "
+                "(either as env vars or passed explicitly to the constructor)."
+            )
         self._base_url = _DEMO_URL if demo else _LIVE_URL
         self._client = httpx.AsyncClient(
             base_url=self._base_url,

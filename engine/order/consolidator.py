@@ -194,9 +194,12 @@ class OrderConsolidator:
 
             if result.error:
                 log.error(
-                    "order FAILED [%s] %s %s qty=%s: %s",
+                    "order FAILED [%s] %s %s qty=%s: %s — rolling back local position tracking",
                     exchange, symbol, side, abs(broker_delta), result.error,
                 )
+                # Rollback the tentative position update so the strategy's next
+                # signal re-attempts the trade instead of thinking it already filled.
+                self._positions[strategy_id][key] = old_pos
                 order_failed = True
             else:
                 log.info(

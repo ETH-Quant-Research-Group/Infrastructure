@@ -550,3 +550,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("stopped")
+    except Exception:
+        log.exception("consolidator_worker crashed with unhandled exception")
+        raise
