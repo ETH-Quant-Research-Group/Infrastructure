@@ -593,9 +593,12 @@ function Assets() {
     return null
   }
 
+  // Only show positions that are currently open with non-zero quantity.
+  // Closed positions still appear in /api/positions/ for history; filter them out of "Open Assets".
+  const openPositions = positions.filter(p => p.status === 'open' && parseFloat(p.quantity) !== 0)
   const filtered = assetClass === 'all'
-    ? positions
-    : positions.filter(p => classifySymbol(p.symbol) === assetClass)
+    ? openPositions
+    : openPositions.filter(p => classifySymbol(p.symbol) === assetClass)
 
   // Group lots by symbol for the new layout
   const grouped = {}
