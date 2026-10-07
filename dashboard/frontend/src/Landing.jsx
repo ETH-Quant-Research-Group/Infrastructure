@@ -293,6 +293,8 @@ function PartnersSection() {
 const BOARD_MEMBERS = [
   { name: 'Bogdan Osadczuk', role: 'Cofounder, Fund Director', photo: profileBogdan },
   { name: 'Carlo Teufel', role: 'Cofounder, Head of Risk', photo: profileCarlo },
+  { name: 'Iordache Rares Mihai', role: 'Founding Engineer', photo: null },
+  { name: 'Alexandre Hachmeister', role: 'Founding Engineer', photo: null },
 ]
 
 function BoardSection() {
@@ -308,7 +310,14 @@ function BoardSection() {
               key={m.name}
               className={`rounded-lg border ${c.b1} ${c.cardAlt} flex flex-col gap-4 px-6 py-6`}
             >
-              <img src={m.photo} alt={m.name} className="h-28 w-28 rounded-full object-cover" />
+              {m.photo ? (
+                <img src={m.photo} alt={m.name} className="h-28 w-28 rounded-full object-cover" />
+              ) : (
+                <div
+                  aria-label={`${m.name} — photo coming soon`}
+                  className={`h-28 w-28 rounded-full border ${c.b1} ${c.cardAlt}`}
+                />
+              )}
               <div className="flex flex-col gap-1">
                 <span className={`${c.t1} font-serif text-xl font-medium`}>{m.name}</span>
                 <span className={`${c.t4} text-xs font-mono uppercase tracking-wider`}>{m.role}</span>
