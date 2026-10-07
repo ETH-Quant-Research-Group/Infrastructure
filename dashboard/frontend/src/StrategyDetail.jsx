@@ -192,7 +192,10 @@ function PnLHistoryChart({ history }) {
 function SymbolTicker({ symbol, fills }) {
   const containerRef = useRef(null)
   const isDark = useTheme()
-  const [selectedInterval, setSelectedInterval] = useState(null)
+  // Default to 1m — users mostly want recent high-resolution price action,
+  // not the 8h bars the strategy itself subscribes to. The pills still let
+  // them switch to any other interval.
+  const [selectedInterval, setSelectedInterval] = useState('1m')
   const [chartType, setChartType] = useState('line')
   const { bars, discoveredInterval } = useBars(symbol, selectedInterval)
   const activeInterval = selectedInterval ?? discoveredInterval
