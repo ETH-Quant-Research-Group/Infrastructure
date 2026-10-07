@@ -427,8 +427,6 @@ function PriceLevelsChart({ bars, lots, strategyName }) {
     lots.forEach((lot, i) => {
       const price = parseFloat(lot.avg_entry_price)
       if (!price || price <= 0) return
-      const qty = parseFloat(lot.quantity)
-      const strat = strategyName ?? lot.exchange.replace('bybit_', '')
       const color = LOT_COLORS[i % LOT_COLORS.length]
       priceSeries.createPriceLine({
         price,
@@ -436,7 +434,7 @@ function PriceLevelsChart({ bars, lots, strategyName }) {
         lineWidth: 1.5,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `L${i + 1} ${qty > 0 ? '+' : ''}${qty} · ${strat}`,
+        title: `L${i + 1}`,
       })
     })
 
@@ -461,11 +459,20 @@ function AssetDetail({ symbol, lots, strategyName }) {
   const currentPrice = bars.length > 0 ? parseFloat(bars[bars.length - 1].close) : null
 
   const totalQty = lots.reduce((s, p) => s + parseFloat(p.quantity || 0), 0)
-  const totalNotional = lots.reduce((s, p) => {
+  // Gross notional = sum of |qty| * price across all legs. For a delta-neutral
+  // perp+spot pair this is roughly 2× the per-leg notional.
+  const grossNotional = lots.reduce((s, p) => {
     const qty = Math.abs(parseFloat(p.quantity || 0))
     const price = parseFloat(p.avg_entry_price) || currentPrice || 0
     return s + qty * price
   }, 0)
+  // Per-leg notional (shown as the main "size" number) — gross / number of legs.
+  const perLegNotional = lots.length > 0 ? grossNotional / lots.length : 0
+  // Treat the net position as "flat" when the residual is < 0.1% of the largest leg.
+  // Prevents the UI from showing meaningless 6-decimal dust like "-0.000093".
+  const largestLegQty = lots.reduce((m, p) => Math.max(m, Math.abs(parseFloat(p.quantity || 0))), 0)
+  const isFlat = largestLegQty > 0 && Math.abs(totalQty) / largestLegQty < 0.001
+  const netExposure = (isFlat ? 0 : totalQty) * (currentPrice || 0)
   const totalUnrPnl = lots.reduce((s, p) => s + parseFloat(p.unrealized_pnl || 0), 0)
   const pnl = fmtPnl(totalUnrPnl)
   const allClosed = lots.every(p => p.status === 'closed')
@@ -491,8 +498,18 @@ function AssetDetail({ symbol, lots, strategyName }) {
       <div className="grid grid-cols-3 gap-x-8 gap-y-6">
         {[
           { label: 'Current Price', value: currentPrice ? `$${currentPrice.toLocaleString('en-US', { maximumFractionDigits: 4 })}` : '—' },
-          { label: 'Total Notional', value: totalNotional > 0 ? `$${totalNotional.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—' },
-          { label: 'Net Quantity', value: `${totalQty > 0 ? '+' : ''}${totalQty.toLocaleString('en-US', { maximumFractionDigits: 6 })}` },
+          {
+            label: 'Notional / Leg',
+            value: perLegNotional > 0
+              ? `$${perLegNotional.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+              : '—',
+          },
+          {
+            label: 'Net Exposure',
+            value: isFlat
+              ? 'Flat'
+              : `${netExposure >= 0 ? '+' : '−'}$${Math.abs(netExposure).toLocaleString('en-US', { maximumFractionDigits: 0 })}`,
+          },
         ].map(s => (
           <div key={s.label} className="flex flex-col gap-1.5">
             <p className={`${c.t3} text-[11px] font-medium uppercase tracking-[0.15em]`}>{s.label}</p>
@@ -503,7 +520,7 @@ function AssetDetail({ symbol, lots, strategyName }) {
 
       {/* Lots table + chart */}
       <div className="flex flex-col lg:flex-row gap-8 lg:gap-12">
-        <div className="lg:w-[520px] shrink-0 overflow-x-auto">
+        <div className="lg:w-[460px] shrink-0 overflow-x-auto">
           <table className="w-full text-xs font-mono">
             <thead>
               <tr className={`border-b ${c.b1} ${c.t3} uppercase tracking-wider`}>
@@ -526,23 +543,23 @@ function AssetDetail({ symbol, lots, strategyName }) {
                 return (
                   <tr key={i} className={`border-b ${c.b1}`}>
                     <td className="py-2.5 pr-5 font-semibold" style={{ color }}>L{i + 1}</td>
-                    <td className={`py-2.5 pr-5 font-semibold ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>{isLong ? 'LONG' : 'SHORT'}</td>
+                    <td className={`py-2.5 pr-5 ${c.t2}`}>{isLong ? 'LONG' : 'SHORT'}</td>
                     <td className={`py-2.5 pr-5 text-right tabular-nums ${c.t1}`}>{qty > 0 ? '+' : ''}{qty}</td>
                     <td className={`py-2.5 pr-5 ${c.t3}`}>{lot.exchange}</td>
                     <td className={`py-2.5 pr-5 ${c.t3}`}>{strategyName ?? '—'}</td>
                     <td className={`py-2.5 pr-5 text-right tabular-nums ${c.t2}`}>{price > 0 ? `$${fmtPrice(lot.avg_entry_price, 4)}` : '—'}</td>
-                    <td className={`py-2.5 text-right tabular-nums font-semibold ${unrPnl.color}`}>{unrPnl.text}</td>
+                    <td className={`py-2.5 text-right tabular-nums ${c.t3}`}>{unrPnl.text}</td>
                   </tr>
                 )
               })}
-              <tr className={`border-t-2 ${c.b1} ${c.t3}`}>
-                <td className="py-2.5 pr-5" />
-                <td className="py-2.5 pr-5 font-semibold uppercase tracking-wider">Net</td>
-                <td className={`py-2.5 pr-5 text-right tabular-nums font-semibold ${c.t1}`}>{totalQty > 0 ? '+' : ''}{totalQty.toFixed(6)}</td>
-                <td className="py-2.5 pr-5" />
-                <td className="py-2.5 pr-5" />
-                <td className="py-2.5 pr-5" />
-                <td className={`py-2.5 text-right tabular-nums font-semibold ${pnl.color}`}>{pnl.text}</td>
+              <tr className={`border-t-2 ${c.b1}`}>
+                <td className="py-3 pr-5" />
+                <td className={`py-3 pr-5 font-semibold uppercase tracking-wider ${c.t1}`}>Net</td>
+                <td className={`py-3 pr-5 text-right tabular-nums font-semibold ${c.t1}`}>{isFlat ? '≈0' : `${totalQty > 0 ? '+' : ''}${totalQty.toFixed(4)}`}</td>
+                <td className="py-3 pr-5" />
+                <td className="py-3 pr-5" />
+                <td className="py-3 pr-5" />
+                <td className={`py-3 text-right tabular-nums font-semibold text-base ${pnl.color}`}>{pnl.text}</td>
               </tr>
             </tbody>
           </table>
