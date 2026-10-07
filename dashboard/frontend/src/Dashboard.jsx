@@ -6,6 +6,7 @@ import Orders from './subpage/Orders'
 import Network from './subpage/Network'
 import { useTheme, th } from './theme'
 import Header from './Header'
+import { useWebSocketFeed } from './utils/ws'
 
 function getChartOpts(c) {
   return {
@@ -63,16 +64,7 @@ function extractSymbols(topics) {
   return syms
 }
 
-function useWebSocketFeed(handler) {
-  const handlerRef = useRef(handler)
-  handlerRef.current = handler
-  useEffect(() => {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws/live`)
-    ws.onmessage = e => { try { handlerRef.current(JSON.parse(e.data)) } catch {} }
-    return () => ws.close()
-  }, [])
-}
+// useWebSocketFeed moved to ./utils/ws so it can be shared with StrategyDetail.jsx
 
 function useNextFunding() {
   // Bybit funding settlements: 00:00, 08:00, 16:00 UTC — every 8 hours.

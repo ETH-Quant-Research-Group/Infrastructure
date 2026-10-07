@@ -4,6 +4,7 @@ import { CandlestickSeries, createChart, createSeriesMarkers, LineSeries } from 
 import { useTheme, th } from './theme'
 import Header from './Header'
 import { fmtUTC } from './utils/format'
+import { useWebSocketFeed } from './utils/ws'
 
 function extractMarkets(topics) {
   const seen = new Set()
@@ -584,7 +585,8 @@ export default function StrategyDetail({ onToggleTheme }) {
       } catch { }
     }
     fetchPnl()
-    const id = setInterval(fetchPnl, 30000)
+    // 5s poll as safety net; live updates come via WebSocket below.
+    const id = setInterval(fetchPnl, 5000)
     return () => clearInterval(id)
   }, [strategyId])
 
@@ -598,7 +600,7 @@ export default function StrategyDetail({ onToggleTheme }) {
       } catch { }
     }
     fetchFills()
-    const id = setInterval(fetchFills, 10000)
+    const id = setInterval(fetchFills, 5000)
     return () => clearInterval(id)
   }, [strategyId])
 
@@ -612,9 +614,25 @@ export default function StrategyDetail({ onToggleTheme }) {
       } catch { }
     }
     fetchPositions()
-    const id = setInterval(fetchPositions, 10000)
+    const id = setInterval(fetchPositions, 5000)
     return () => clearInterval(id)
   }, [])
+
+  // Live push updates — same pattern as Dashboard.jsx so this view stays
+  // numerically in sync with the main dashboard instead of lagging by poll
+  // interval. API polls above remain as safety nets if WebSocket drops.
+  useWebSocketFeed(msg => {
+    if (msg.subject === `pnl.${strategyId}`) {
+      // Merge latest snapshot — keep history untouched (history comes from API).
+      setLatest(prev => ({ ...prev, ...msg.data }))
+    } else if (msg.subject === 'positions.snapshot') {
+      const snap = Array.isArray(msg.data) ? msg.data : []
+      setPositions(snap.map(p => ({ ...p, status: 'open' })))
+    } else if (msg.subject === `fills.${strategyId}`) {
+      // Prepend new fill to the list (most recent first, as the API returns).
+      setFills(prev => [msg.data, ...prev].slice(0, 500))
+    }
+  })
 
   const symbols = extractSymbols(strategy?.topics)
   const symbolsKey = symbols.join(',')
