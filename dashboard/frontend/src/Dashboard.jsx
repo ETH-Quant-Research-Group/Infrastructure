@@ -518,9 +518,8 @@ function AssetDetail({ symbol, lots, strategyName }) {
         ))}
       </div>
 
-      {/* Lots table + chart */}
-      <div className="flex flex-col lg:flex-row gap-8 lg:gap-12">
-        <div className="lg:w-[460px] shrink-0 overflow-x-auto">
+      {/* Lots table */}
+      <div className="overflow-x-auto">
           <table className="w-full text-xs font-mono">
             <thead>
               <tr className={`border-b ${c.b1} ${c.t3} uppercase tracking-wider`}>
@@ -563,10 +562,6 @@ function AssetDetail({ symbol, lots, strategyName }) {
               </tr>
             </tbody>
           </table>
-        </div>
-        <div className="flex-1 min-w-0">
-          <PriceLevelsChart bars={bars} lots={lots} strategyName={strategyName} />
-        </div>
       </div>
     </div>
   )
