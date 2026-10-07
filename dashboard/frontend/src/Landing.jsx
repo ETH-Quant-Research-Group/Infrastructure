@@ -7,6 +7,7 @@ import aceLogoDark from './assets/ACELogoWhite.svg'
 import aceLogoLight from './assets/ACELogoBlack.svg'
 import profileBogdan from './assets/profile_BogdanOsdaczuk.jpeg'
 import profileCarlo from './assets/profile_CarloTeufel.jpeg'
+import profileAlexandre from './assets/profile_AlexandreHachmeister.jpg'
 import heroZurich from './assets/hero-zurich.avif'
 import { useTheme, th } from './theme'
 import Header from './Header'
@@ -301,7 +302,7 @@ const BOARD_MEMBERS = [
   { name: 'Bogdan Osadczuk', role: 'Cofounder, Fund Director', photo: profileBogdan },
   { name: 'Carlo Teufel', role: 'Cofounder, Head of Risk', photo: profileCarlo },
   { name: 'Iordache Rares Mihai', role: 'Founding Engineer', photo: null },
-  { name: 'Alexandre Hachmeister', role: 'Founding Engineer', photo: null },
+  { name: 'Alexandre Hachmeister', role: 'Founding Engineer', photo: profileAlexandre },
 ]
 
 function BoardSection() {
