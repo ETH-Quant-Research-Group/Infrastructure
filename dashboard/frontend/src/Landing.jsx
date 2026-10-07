@@ -304,7 +304,7 @@ function BoardSection() {
     <section id="board" className={`px-4 md:px-8 py-16 md:py-20 border-t ${c.b1} scroll-mt-20`}>
       <div className="max-w-5xl mx-auto flex flex-col gap-8">
         <h2 className={`font-serif ${c.t1} font-medium text-3xl md:text-[40px] leading-[1.1]`}>Board</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl mx-auto w-full">
           {BOARD_MEMBERS.map(m => (
             <div
               key={m.name}
