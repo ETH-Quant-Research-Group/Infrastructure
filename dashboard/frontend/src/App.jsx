@@ -6,7 +6,7 @@ import StrategyDetail from './StrategyDetail'
 import { ThemeContext } from './theme'
 
 export default function App() {
-  const [isDark, setIsDark] = useState(true)
+  const [isDark, setIsDark] = useState(false)
 
   useEffect(() => {
     document.documentElement.classList.toggle('light', !isDark)
