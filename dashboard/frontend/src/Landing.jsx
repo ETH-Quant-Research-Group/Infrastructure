@@ -255,14 +255,28 @@ function MissionSection() {
           </div>
           <h2 className={`font-serif ${c.t1} font-medium text-3xl md:text-[40px] leading-[1.1]`}>Our Mission</h2>
         </div>
-        <p className={`${c.t3} text-sm md:text-base leading-relaxed max-w-3xl`}>
-          QRF is a student-run quantitative fund operating under the Analytics Club at ETH
-          Zurich, bringing together mathematics and engineering students to conduct applied
-          research and manage a real-money portfolio as a rigorous learning environment. We
-          build every layer of our infrastructure in-house and hold each strategy to full
-          academic rigour before it goes live. A non-profit initiative, QRF reinvests all
-          returns in furtherance of its educational mission.
-        </p>
+        <div className={`${c.t3} text-sm md:text-base leading-relaxed max-w-3xl flex flex-col gap-5`}>
+          <p>
+            QRF is a student-run quantitative fund operating under the Analytics Club at ETH
+            Zurich, bringing together mathematics and engineering students to conduct applied
+            research and manage a real-money portfolio as a rigorous learning environment. We
+            build every layer of our infrastructure in-house and hold each strategy to full
+            academic rigour before it goes live. A non-profit initiative, QRF reinvests all
+            returns in furtherance of its educational mission.
+          </p>
+          <p>
+            We operate with full operational transparency: live positions, performance, and
+            system state are visible to the public through our dashboard in real time. For a
+            fund with an educational mandate, visibility is not a concession — it is a
+            deliberate commitment. Transparency strengthens accountability to our sponsors
+            and partners, reinforces a research-first culture inside the team, and lets
+            prospective collaborators evaluate our work on its substance rather than on
+            marketing. The intellectual property that drives performance — our models,
+            research methodology, and risk framework — remains firmly protected. What we
+            publish openly is the record of a disciplined operation, held to the same
+            standard of scrutiny as the research behind it.
+          </p>
+        </div>
       </div>
     </section>
   )
