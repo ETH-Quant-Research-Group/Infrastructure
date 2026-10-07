@@ -19,19 +19,19 @@ const PLACEHOLDER_SPONSORS = ['Sponsor One', 'Sponsor Two', 'Sponsor Three', 'Sp
 
 const PLACEHOLDER_NEWS = [
   {
-    date: '2026-06-01',
-    title: 'QRF launches delta-neutral funding-rate strategy',
-    blurb: 'Our latest strategy goes live across Bybit perpetual markets, hedging spot exposure while harvesting funding income.',
+    date: '2026-10-07',
+    title: 'Founding engineering team expands',
+    blurb: 'Two founding engineers join QRF, both bringing hands-on experience in quantitative trading and systems engineering. The addition accelerates the roadmap toward multi-strategy deployment and raises the operational bar across the stack.',
   },
   {
     date: '2026-04-15',
-    title: 'Fund crosses first performance milestone',
-    blurb: 'Placeholder announcement — replace with a real update once available.',
+    title: 'QRF launches delta-neutral funding-rate strategy',
+    blurb: 'The fund deploys its first production strategy: a delta-neutral funding-rate arbitrage on Bybit perpetual futures. The launch validates the trading infrastructure end-to-end under live market conditions and marks the transition from research to execution.',
   },
   {
     date: '2026-02-10',
     title: 'QRF founded in Zurich',
-    blurb: 'Placeholder announcement — replace with a real update once available.',
+    blurb: 'QRF is established in cooperation with the Analytics Club at ETH Zürich with a focused mission: provide exceptional students a rigorous environment to develop, test, and operate real quantitative strategies, while continuously expanding the fund’s trading infrastructure.',
   },
 ]
 
