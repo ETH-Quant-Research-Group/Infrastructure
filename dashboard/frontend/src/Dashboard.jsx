@@ -543,7 +543,7 @@ function AssetDetail({ symbol, lots, strategyName }) {
                   <tr key={i} className={`border-b ${c.b1}`}>
                     <td className="py-2.5 pr-5 font-semibold" style={{ color }}>L{i + 1}</td>
                     <td className={`py-2.5 pr-5 ${c.t2}`}>{isLong ? 'LONG' : 'SHORT'}</td>
-                    <td className={`py-2.5 pr-5 text-right tabular-nums ${c.t1}`}>{qty > 0 ? '+' : ''}{qty}</td>
+                    <td className={`py-2.5 pr-5 text-right tabular-nums ${c.t1}`}>{qty >= 0 ? '+' : '−'}{Math.abs(qty).toFixed(6)}</td>
                     <td className={`py-2.5 pr-5 ${c.t3}`}>{lot.exchange}</td>
                     <td className={`py-2.5 pr-5 ${c.t3}`}>{strategyName ?? '—'}</td>
                     <td className={`py-2.5 pr-5 text-right tabular-nums ${c.t2}`}>{price > 0 ? `$${fmtPrice(lot.avg_entry_price, 4)}` : '—'}</td>
@@ -554,7 +554,7 @@ function AssetDetail({ symbol, lots, strategyName }) {
               <tr className={`border-t-2 ${c.b1}`}>
                 <td className="py-3 pr-5" />
                 <td className={`py-3 pr-5 font-semibold uppercase tracking-wider ${c.t1}`}>Net</td>
-                <td className={`py-3 pr-5 text-right tabular-nums font-semibold ${c.t1}`}>{isFlat ? '≈0' : `${totalQty > 0 ? '+' : ''}${totalQty.toFixed(4)}`}</td>
+                <td className={`py-3 pr-5 text-right tabular-nums font-semibold ${c.t1}`}>{isFlat ? '≈ 0' : `${totalQty >= 0 ? '+' : '−'}${Math.abs(totalQty).toFixed(6)}`}</td>
                 <td className="py-3 pr-5" />
                 <td className="py-3 pr-5" />
                 <td className="py-3 pr-5" />
