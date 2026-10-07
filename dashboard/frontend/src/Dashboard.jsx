@@ -243,9 +243,23 @@ function Strategies() {
       } catch { }
     }
     fetch_()
-    const id = setInterval(fetch_, 30000)
+    // Lightweight 5s poll as a safety net; the WebSocket handler below is the
+    // primary source of fresh pnl numbers. Previous 30s poll caused this card's
+    // "Unrealized" to lag the live per-symbol uPnL (which streams via WS) by
+    // up to half a minute — making the two visibly disagree on fast markets.
+    const id = setInterval(fetch_, 5000)
     return () => clearInterval(id)
   }, [])
+
+  // Live-update pnlMap from NATS `pnl.<strategy_id>` messages so the card
+  // tracks the same stream the per-symbol uPnL already uses. Keeps top and
+  // bottom numbers in sync without waiting for the next poll tick.
+  useWebSocketFeed(msg => {
+    if (!msg.subject?.startsWith('pnl.')) return
+    const sid = msg.data?.strategy_id
+    if (!sid) return
+    setPnlMap(prev => ({ ...prev, [sid]: { ...prev[sid], ...msg.data } }))
+  })
 
   const fmtPnlVal = v => {
     const n = parseFloat(v)
