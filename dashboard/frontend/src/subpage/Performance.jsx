@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { useTheme, th } from '../theme'
+import { makeChartTickFmt, fmtTooltipDate } from '../utils/chart'
 
 const POLL_MS = 30000
 
@@ -20,9 +21,7 @@ function fmt(v) {
   return `${s}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-function fmtChartDate(t) {
-  return new Date(t * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
+// fmtChartDate replaced by range-aware makeChartTickFmt + fmtTooltipDate from utils/chart.
 
 function fmtChartVal(v) {
   const n = Number(v)
@@ -52,7 +51,7 @@ function ChartTooltip({ active, payload, label, c }) {
   if (!active || !payload?.length) return null
   return (
     <div className={`${c.card} border ${c.b1} rounded-md px-3 py-2`}>
-      <p className={`${c.t4} text-[10px] font-mono mb-1`}>{fmtChartDate(label)}</p>
+      <p className={`${c.t4} text-[10px] font-mono mb-1`}>{fmtTooltipDate(label)}</p>
       <p className={`font-serif ${c.t1} text-base font-medium`}>{fmtChartVal(payload[0].value)}</p>
     </div>
   )
@@ -67,6 +66,7 @@ function FundChart({ series }) {
   }
 
   const data = [...series].sort((a, b) => a.time - b.time)
+  const tickFmt = makeChartTickFmt(data)
   const lineColor = '#26a69a'
 
   return (
@@ -80,7 +80,7 @@ function FundChart({ series }) {
             </linearGradient>
           </defs>
           <CartesianGrid vertical={false} stroke={c.chartGrid} />
-          <XAxis dataKey="time" tickFormatter={fmtChartDate} tick={{ fill: c.chartText, fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={40} />
+          <XAxis dataKey="time" tickFormatter={tickFmt} tick={{ fill: c.chartText, fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={40} />
           <YAxis tickFormatter={fmtChartVal} tick={{ fill: c.chartText, fontSize: 11 }} axisLine={false} tickLine={false} width={52} />
           <Tooltip content={<ChartTooltip c={c} />} />
           <Area type="monotone" dataKey="value" stroke={lineColor} strokeWidth={2} fill="url(#fundFill)" />

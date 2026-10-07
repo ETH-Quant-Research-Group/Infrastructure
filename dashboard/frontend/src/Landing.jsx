@@ -10,6 +10,7 @@ import profileCarlo from './assets/profile_CarloTeufel.jpeg'
 import heroZurich from './assets/hero-zurich.avif'
 import { useTheme, th } from './theme'
 import Header from './Header'
+import { makeChartTickFmt, fmtTooltipDate } from './utils/chart'
 
 const POLL_MS = 30000
 
@@ -53,9 +54,7 @@ function fmtPnl(v) {
   }
 }
 
-function chartFmtDate(t) {
-  return new Date(t * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
+// chartFmtDate removed — use makeChartTickFmt(series) / fmtTooltipDate from ./utils/chart.
 
 function chartFmtValue(v) {
   const n = Number(v)
@@ -68,7 +67,7 @@ function ChartTooltip({ active, payload, label, c }) {
   if (!active || !payload?.length) return null
   return (
     <div className={`${c.card} border ${c.b1} rounded-md px-3 py-2`}>
-      <p className={`${c.t4} text-[10px] font-mono mb-1`}>{chartFmtDate(label)}</p>
+      <p className={`${c.t4} text-[10px] font-mono mb-1`}>{fmtTooltipDate(label)}</p>
       <p className={`font-serif ${c.t1} text-base font-medium`}>{chartFmtValue(payload[0].value)}</p>
     </div>
   )
@@ -83,6 +82,7 @@ function TeaserChart({ series }) {
   }
 
   const data = [...series].sort((a, b) => a.time - b.time)
+  const tickFmt = makeChartTickFmt(data)
   const lineColor = '#26a69a'
 
   return (
@@ -98,7 +98,7 @@ function TeaserChart({ series }) {
           <CartesianGrid vertical={false} stroke={c.chartGrid} />
           <XAxis
             dataKey="time"
-            tickFormatter={chartFmtDate}
+            tickFormatter={tickFmt}
             tick={{ fill: c.chartText, fontSize: 11 }}
             axisLine={false}
             tickLine={false}
