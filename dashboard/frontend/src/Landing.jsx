@@ -266,15 +266,8 @@ function MissionSection() {
           </p>
           <p>
             We operate with full operational transparency: live positions, performance, and
-            system state are visible to the public through our dashboard in real time. For a
-            fund with an educational mandate, visibility is not a concession — it is a
-            deliberate commitment. Transparency strengthens accountability to our sponsors
-            and partners, reinforces a research-first culture inside the team, and lets
-            prospective collaborators evaluate our work on its substance rather than on
-            marketing. The intellectual property that drives performance — our models,
-            research methodology, and risk framework — remains firmly protected. What we
-            publish openly is the record of a disciplined operation, held to the same
-            standard of scrutiny as the research behind it.
+            system state are public on our dashboard in real time. The research, models, and
+            risk framework that drive performance remain internal.
           </p>
         </div>
       </div>
