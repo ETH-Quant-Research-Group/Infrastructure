@@ -26,8 +26,8 @@ const PLACEHOLDER_NEWS = [
   },
   {
     date: '2026-04-15',
-    title: 'QRF launches delta-neutral funding-rate strategy',
-    blurb: 'The fund deploys its first production strategy: a delta-neutral funding-rate arbitrage on Bybit perpetual futures. The launch validates the trading infrastructure end-to-end under live market conditions and marks the transition from research to execution.',
+    title: 'Crypto Desk launches with delta-neutral funding-rate strategy',
+    blurb: 'QRF opens its Crypto Desk by deploying its first production strategy: a delta-neutral funding-rate arbitrage on Bybit perpetual futures. The launch validates the trading infrastructure under live market conditions and marks both the transition from research to execution and the first of several desks the fund intends to operate.',
   },
   {
     date: '2026-02-10',
