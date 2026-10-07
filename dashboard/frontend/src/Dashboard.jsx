@@ -602,9 +602,22 @@ function Assets() {
       }
     }
     fetchPositions()
-    const id = setInterval(fetchPositions, 30000)
+    // Safety-net poll in case the WebSocket drops. The WebSocket handler
+    // below is the primary source of fresh positions data.
+    const id = setInterval(fetchPositions, 5000)
     return () => clearInterval(id)
   }, [])
+
+  // Live-update positions from the consolidator's `positions.snapshot` stream
+  // (same source the Strategies card's per-symbol uPnL already reads from).
+  // Keeps the Assets table in sync with the Strategies card instead of
+  // lagging up to 30s behind. Snapshot only carries currently-open positions,
+  // so we tag each with status='open' to match the API shape.
+  useWebSocketFeed(msg => {
+    if (msg.subject !== 'positions.snapshot') return
+    const snap = Array.isArray(msg.data) ? msg.data : []
+    setPositions(snap.map(p => ({ ...p, status: 'open' })))
+  })
 
   useEffect(() => {
     fetch('/api/topology/').then(r => r.json()).then(d => setTopology(d.strategies ?? [])).catch(() => {})
