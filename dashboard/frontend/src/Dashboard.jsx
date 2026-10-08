@@ -626,7 +626,17 @@ function Assets() {
 
   // Only show positions that are currently open with non-zero quantity.
   // Closed positions still appear in /api/positions/ for history; filter them out of "Open Assets".
-  const openPositions = positions.filter(p => p.status === 'open' && parseFloat(p.quantity) !== 0)
+  // Hide dust: a position worth < $1 notional (|qty * entry|) is almost
+  // certainly a leftover rounding residual from a prior exit and not something
+  // the operator wants cluttering the Assets view.
+  const DUST_USD_THRESHOLD = 1
+  const openPositions = positions.filter(p => {
+    if (p.status !== 'open') return false
+    const qty = parseFloat(p.quantity)
+    if (qty === 0) return false
+    const entry = parseFloat(p.avg_entry_price) || 0
+    return Math.abs(qty * entry) >= DUST_USD_THRESHOLD
+  })
   const filtered = assetClass === 'all'
     ? openPositions
     : openPositions.filter(p => classifySymbol(p.symbol) === assetClass)
