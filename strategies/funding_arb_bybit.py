@@ -17,7 +17,9 @@ Parameters (retuned 2026-10-08 after first live-trade analysis showed that
   min_hold               1 period   (8 h)
   max_hold             100 periods  (~33 d safety cap; never the thesis exit)
   max_volatility       0.80 annualised vol (skips liquidation-cascade regimes)
-  position_size         3 % of equity per symbol (max ~24 % deployed if all 8 enter)
+  position_size         3 % of sizing basis per symbol
+  trading_aum_cap      $60 000 hard cap on the sizing basis (rest of wallet
+                       reserved; sizes never grow past this even on profits)
 
 Decisions are taken at most once per 8 h settlement window per symbol; all
 predicted-rate stream ticks between settlements are ignored (see the
@@ -102,7 +104,13 @@ class FundingArbBybitStrategy(BaseStrategy):
 
     def __init__(
         self,
-        initial_equity: float = 30_000.0,
+        initial_equity: float = 60_000.0,
+        # Hard cap on the sizing basis. Even if `_equity` grows past this
+        # from accumulated funding income, position sizes are computed against
+        # `min(_equity, max_trading_aum)` — so the strategy never deploys more
+        # than this much capital in aggregate, regardless of how profitable it
+        # becomes. Keeps the remainder of the Bybit wallet as untouched reserve.
+        max_trading_aum: float = 60_000.0,
         # 3% per leg * 8 symbols = max 24% deployed if every pair enters at once.
         # Smaller than the old 50% to spread risk across more candidates and keep
         # per-trade fee cost small enough to amortize over fewer funding cycles.
@@ -124,6 +132,7 @@ class FundingArbBybitStrategy(BaseStrategy):
         self._symbols = tuple(symbols)
         self._params = {
             "position_size_pct": position_size_pct,
+            "max_trading_aum": max_trading_aum,
             "entry_threshold_ann": entry_threshold_annualized,
             "exit_threshold_ann": exit_threshold_annualized,
             "min_consecutive": min_consecutive_positive,
@@ -555,7 +564,12 @@ class FundingArbBybitStrategy(BaseStrategy):
         if mark <= 0:
             return None
 
-        notional = self._equity * self._params["position_size_pct"]
+        # Sizing basis: min(equity, hard-cap) so position sizes never grow
+        # above the configured trading-AUM ceiling even if the strategy has
+        # been profitable. If equity has drawn down below the cap, sizes
+        # scale down with it (safer than always using the ceiling).
+        sizing_basis = min(self._equity, self._params["max_trading_aum"])
+        notional = sizing_basis * self._params["position_size_pct"]
         size = -math.floor(abs(notional / mark))   # negative integer = short perp
         if size == 0:
             log.warning(
