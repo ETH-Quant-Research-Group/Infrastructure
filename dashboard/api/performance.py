@@ -18,6 +18,13 @@ from dashboard.store import (
 router = APIRouter()
 log = logging.getLogger(__name__)
 
+# Narrative fund size shown on the dashboard. The actual Bybit wallet may
+# hold more capital (treated as untouchable reserve); the public dashboard
+# presents the fund as if its entire AUM is this amount, moving up/down
+# with realized + unrealized PnL. Keep in sync with max_trading_aum in
+# strategies/funding_arb_bybit.py.
+_FUND_SIZE_USD = 60_000.0
+
 
 @router.get("/pnl")
 async def get_pnl() -> dict:
@@ -124,10 +131,19 @@ async def get_fund() -> dict:
         total_realized = sum(float(s.get("total_realized", 0) or 0) for s in broker_exchange_states.values())
         total_unrealized = sum(float(s.get("total_unrealized", 0) or 0) for s in broker_exchange_states.values())
 
+    # Present the fund as a fixed-size pool. The real Bybit wallet may hold
+    # significantly more capital (reserve); the dashboard treats that reserve
+    # as if it does not exist. Fund AUM = $60k baseline, moving with PnL.
+    fund_aum = max(_FUND_SIZE_USD + total_realized + total_unrealized, 0.0)
+    fund_wallet = max(_FUND_SIZE_USD + total_realized, 0.0)
+    # Available ≈ wallet for low-leverage spot+perp hedges; a tighter number
+    # would require per-exchange margin accounting we don't currently expose.
+    fund_available = fund_wallet
+
     return {
-        "total_aum": round(total_aum, 4) or None,
-        "total_wallet_balance": round(total_wallet, 4) or None,
-        "total_available": round(total_available, 4) or None,
+        "total_aum": round(fund_aum, 4),
+        "total_wallet_balance": round(fund_wallet, 4),
+        "total_available": round(fund_available, 4),
         "total_pnl": round(total_realized + total_unrealized, 4),
         "total_realized": round(total_realized, 4),
         "total_unrealized": round(total_unrealized, 4),
