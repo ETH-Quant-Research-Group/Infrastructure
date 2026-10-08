@@ -1,6 +1,7 @@
 """Funding Rate Arbitrage — Bybit delta-neutral (perp short + spot long hedge).
 
-Runs on ETHUSDT and LINKUSDT simultaneously using Bybit's 8h settlement.
+Runs on a basket of 8 Bybit perpetual pairs (ETH, LINK, SOL, XRP, DOGE,
+AVAX, DOT, ATOM) simultaneously using Bybit's 8h settlement.
 
 Strategy:
   - Shorts the perp on Bybit linear (exchange="bybit_demo") to collect funding.
@@ -8,18 +9,15 @@ Strategy:
     (exchange="bybit_spot") to remain delta-neutral.
   - On exit, closes the perp first; after that fill is confirmed, closes spot.
 
-Parameters (tuned 2026-05-02 after fee-aware re-analysis):
-  entry_threshold       10.5 % annualised  (between Bybit's 10.95 % cap on
-                                            LINK and the 5 % exit threshold;
-                                            high enough to outpace fees over
-                                            ~30 settlements, low enough to
-                                            actually trigger in current regime)
-  exit_threshold         5 % annualised  (hysteresis vs entry, no churn)
+Parameters (retuned 2026-10-08 after first live-trade analysis showed that
+10.5 % entry windows faded too quickly to amortize round-trip fees):
+  entry_threshold       15 % annualised   (strongly-elevated funding only)
+  exit_threshold         2 % annualised   (wide hysteresis — hold through dips)
   min_consecutive        3 positive settled periods (24 h confirmed regime)
   min_hold               1 period   (8 h)
   max_hold             100 periods  (~33 d safety cap; never the thesis exit)
   max_volatility       0.80 annualised vol (skips liquidation-cascade regimes)
-  position_size       50 % of equity per symbol
+  position_size         3 % of equity per symbol (max ~24 % deployed if all 8 enter)
 
 Decisions are taken at most once per 8 h settlement window per symbol; all
 predicted-rate stream ticks between settlements are ignored (see the
@@ -49,7 +47,16 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-_SYMBOLS = ("ETHUSDT", "LINKUSDT")
+_SYMBOLS = (
+    "ETHUSDT",
+    "LINKUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "DOTUSDT",
+    "ATOMUSDT",
+)
 
 # Bybit spot taker fee (0.10%).  Spot fees are charged in the base coin on a
 # Buy and in the quote coin on a Sell.  To receive exactly perp_qty base coin
@@ -87,19 +94,26 @@ class FundingArbBybitStrategy(BaseStrategy):
     display_name: ClassVar[str] = "FARB2.0-Bybit"
 
     topics: ClassVar[list[str]] = [
-        "futures.ETHUSDT.bars.8h",
-        "futures.ETHUSDT.funding_rate",
-        "futures.LINKUSDT.bars.8h",
-        "futures.LINKUSDT.funding_rate",
+        f"futures.{sym}.{suffix}"
+        for sym in _SYMBOLS
+        for suffix in ("bars.8h", "funding_rate")
     ]
     max_loss: ClassVar[Decimal] = Decimal("500")
 
     def __init__(
         self,
         initial_equity: float = 30_000.0,
-        position_size_pct: float = 0.50,
-        entry_threshold_annualized: float = 0.105,
-        exit_threshold_annualized: float = 0.05,
+        # 3% per leg * 8 symbols = max 24% deployed if every pair enters at once.
+        # Smaller than the old 50% to spread risk across more candidates and keep
+        # per-trade fee cost small enough to amortize over fewer funding cycles.
+        position_size_pct: float = 0.03,
+        # 15% ann is a strongly-elevated funding regime; by observation the
+        # old 10.5% was too permissive — crossings often faded fast and left us
+        # eating round-trip fees before the position earned anything back.
+        entry_threshold_annualized: float = 0.15,
+        # 2% ann exit widens the hysteresis band so a mild temporary dip in
+        # funding does not force an unnecessary round-trip exit + re-entry.
+        exit_threshold_annualized: float = 0.02,
         min_consecutive_positive: int = 3,
         min_hold_periods: int = 1,
         max_hold_periods: int = 100,
