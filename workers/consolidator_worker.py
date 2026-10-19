@@ -1,4 +1,5 @@
-"""Consolidator worker — nets strategy signals and routes broker orders.
+"""Consolidator worker — turns each strategy signal into one tagged broker
+order and reports the real fill back to the strategy.
 
 Run with::
 
@@ -7,13 +8,13 @@ Run with::
 Environment variables:
 
 - ``NATS_URL``          (default: ``nats://localhost:4222``)
-- ``DEFAULT_EXCHANGE``  (default: ``bybit_paper``)  — exchange used when a
+- ``DEFAULT_EXCHANGE``  (default: ``bybit_demo``)  — exchange used when a
                         strategy signal carries no ``exchange`` field.
 
-Available exchanges (add more in ``_build_brokers()``):
+Available exchanges (add more in ``build_brokers()``):
 
-    bybit_paper   BybitPaperBroker  — paper fills at live Bybit bid/ask
-    paper         PaperBroker       — fills at last bar close, no fees
+    bybit_demo    BybitBroker(demo=True)      — Bybit linear perps, demo account
+    bybit_spot    BybitSpotBroker(demo=True)  — Bybit spot, demo account
 
 Strategies select an exchange by setting ``exchange="lighter"`` (or any other
 registered name) on the :class:`~interfaces.signals.TargetPosition` they emit.
@@ -28,6 +29,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -39,6 +41,10 @@ from config import NATS_URL
 from engine.data import codec
 from engine.order.consolidator import OrderConsolidator
 from engine.order.guard_registry import StrategyGuardRegistry
+from engine.order.instruments import InstrumentCache
+from engine.order.ledger import LedgerDB
+from engine.order.performance import BybitPrices
+from engine.order.snapshots import SnapshotDB
 from execution.brokers.bybit import BybitBroker
 from execution.brokers.bybit_spot import BybitSpotBroker
 from execution.types import FillConfirmation, Order, OrderSide, OrderType, PerpOrder
@@ -66,17 +72,37 @@ def _resolve_default_max_loss() -> Decimal:
         return Decimal("1000")
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+# Guard (engine/order/guard_registry.py): count unrealized PnL too, or only
+# realized + funding − fees; and how often to re-check every strategy.
+GUARD_INCLUDE_UNREALIZED = _env_flag("GUARD_INCLUDE_UNREALIZED", default=False)
+GUARD_CHECK_INTERVAL = float(os.getenv("GUARD_CHECK_INTERVAL", "30"))
+GUARD_RESET_SUBJECT = "control.guard.reset"
+GUARD_STATUS_SUBJECT = "control.guard.status"
+
+
 # ---------------------------------------------------------------------------
 # Instrument lot-size precision
 #
 # Bybit's order endpoints reject quantities with finer precision than the
 # instrument's lot size.  Quantizing with ROUND_DOWN guarantees we never
 # request more than we actually have on a Sell (which would 110030-error)
-# and never over-order on a Buy (residual is reconciled on the next cycle).
+# and never over-order on a Buy (the rounded-off remainder is not ordered).
 #
-# Sourced from Bybit's instruments-info endpoint as of 2026-05-02.  Add new
-# symbols here when adding strategies.  ETHUSDT spot has 5-decimal precision
-# which the previous implementation truncated to 3.
+# The real rules (step, min / max quantity, min order value) for every symbol
+# are now loaded from Bybit's instruments-info endpoint at start-up and kept
+# in INSTRUMENTS (engine/order/instruments.py), refreshed every few hours —
+# never fetched per order.  This table is only the fallback for when they
+# couldn't be loaded.  A symbol in neither is dropped, not guessed.
+#
+# Sourced from Bybit's instruments-info endpoint as of 2026-05-02.  ETHUSDT
+# spot has 5-decimal precision which the previous implementation truncated to 3.
 # ---------------------------------------------------------------------------
 
 _LOT_SIZE: dict[str, dict[str, Decimal]] = {
@@ -91,11 +117,19 @@ _LOT_SIZE: dict[str, dict[str, Decimal]] = {
 }
 
 
+INSTRUMENTS = InstrumentCache(fallback_steps=_LOT_SIZE)
+INSTRUMENTS_REFRESH = 6 * 3600.0  # seconds; retried every minute until loaded
+INSTRUMENTS_SUBJECT = "control.instruments.rules"
+
+
 def _quantize_to_lot(quantity: Decimal, exchange: str, symbol: str) -> Decimal:
     """Round ``quantity`` DOWN to the instrument's lot size.
 
     Falls back to a safe default per exchange family if the symbol is not
     in the cache (1 contract for perps, 0.001 base coin for spot).
+
+    Legacy: no longer used by ``_order_factory`` (it guessed for unknown
+    symbols — B2); kept as it was.
     """
     lot = _LOT_SIZE.get(exchange, {}).get(symbol)
     if lot is None:
@@ -110,7 +144,7 @@ def _quantize_to_lot(quantity: Decimal, exchange: str, symbol: str) -> Decimal:
 # ---------------------------------------------------------------------------
 
 
-def _build_brokers() -> dict[str, BaseBroker]:
+def build_brokers() -> dict[str, BaseBroker]:
     """Instantiate every broker that should be active for this run."""
     brokers: dict[str, BaseBroker] = {
         "bybit_demo": BybitBroker(
@@ -143,10 +177,12 @@ def _order_factory(
     _price: Decimal,
     exchange: str = "",
 ) -> Order:
-    # Quantize DOWN to the instrument's lot size.  ROUND_DOWN guarantees we
-    # never order more than we have on a Sell (avoids 110030 insufficient
-    # balance) and never over-buy on entry (residual is reconciled next cycle).
-    quantity = _quantize_to_lot(quantity, exchange, symbol)
+    # Round DOWN to the instrument's real lot size (from Bybit, cached).
+    # ROUND_DOWN guarantees we never order more than we have on a Sell
+    # (avoids 110030 insufficient balance) and never over-buy on entry (the
+    # remainder is not ordered).  Unknown symbols are left as they are and
+    # then dropped by INSTRUMENTS.check (the consolidator's order_check).
+    quantity = INSTRUMENTS.quantize(exchange, symbol, quantity)
     return PerpOrder(
         symbol=symbol,
         side=side,
@@ -510,6 +546,123 @@ async def _sync_guard_config(
                     )
 
 
+async def _check_guards_periodically(
+    guard_registry: StrategyGuardRegistry,
+    interval: float,
+) -> None:
+    """Re-check every strategy's guard, so an open position losing value
+    (GUARD_INCLUDE_UNREALIZED) or newly collected funding is caught without
+    waiting for the strategy's next fill.  A trip is acted on by
+    _sync_guard_config (stops the container)."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await guard_registry.check_all()
+        except Exception:
+            log.exception("guard check failed")
+
+
+async def _serve_guard_control(
+    nc: nats.aio.client.Client,
+    guard_registry: StrategyGuardRegistry,
+) -> None:
+    """``control.guard.reset`` {"strategy": name} and ``control.guard.status``
+    — used by ``python -m workers.guard_control``."""
+
+    async def _reset(msg: nats.aio.msg.Msg) -> None:
+        try:
+            name = str(json.loads(msg.data or b"{}")["strategy"])
+            baseline = guard_registry.reset(name)
+            reply: dict[str, Any] = {"reset": name, "baseline": str(baseline)}
+        except (KeyError, ValueError, TypeError) as exc:
+            reply = {"error": str(exc)}
+        await msg.respond(json.dumps(reply).encode())
+
+    async def _status(msg: nats.aio.msg.Msg) -> None:
+        reply: dict[str, Any]
+        try:
+            reply = {"guards": guard_registry.status()}
+        except Exception as exc:
+            reply = {"error": str(exc)}
+        await msg.respond(json.dumps(reply).encode())
+
+    await nc.subscribe(GUARD_RESET_SUBJECT, cb=_reset)
+    await nc.subscribe(GUARD_STATUS_SUBJECT, cb=_status)
+    await asyncio.get_running_loop().create_future()
+
+
+async def _refresh_instruments(brokers: dict[str, BaseBroker]) -> None:
+    """Reload the order-size rules every INSTRUMENTS_REFRESH seconds (every
+    minute while they've never loaded).  Orders and strategy questions are
+    always answered from INSTRUMENTS in memory, never by asking Bybit."""
+    while True:
+        await asyncio.sleep(INSTRUMENTS_REFRESH if INSTRUMENTS.loaded else 60)
+        counts = await INSTRUMENTS.load(brokers)
+        if counts:
+            log.info("order-size rules refreshed: %s", counts)
+
+
+def instruments_reply(data: bytes) -> dict[str, Any]:
+    """Reply for ``control.instruments.rules`` {"symbols": [...]} (or {} for
+    every symbol): the cached rules — what a strategy's ``order_sizing``
+    is filled with."""
+    try:
+        body = json.loads(data or b"{}")
+        symbols = body.get("symbols")
+        if symbols is not None:
+            symbols = [str(s) for s in symbols]
+    except (ValueError, TypeError, AttributeError) as exc:
+        return {"error": f"bad request: {exc}"}
+    return {
+        "rules": INSTRUMENTS.as_dicts(symbols),
+        "loaded_at": {ex: at.isoformat() for ex, at in INSTRUMENTS.loaded_at.items()},
+    }
+
+
+async def _serve_instruments(nc: nats.aio.client.Client) -> None:
+    async def _rules(msg: nats.aio.msg.Msg) -> None:
+        await msg.respond(json.dumps(instruments_reply(msg.data)).encode())
+
+    await nc.subscribe(INSTRUMENTS_SUBJECT, cb=_rules)
+    await asyncio.get_running_loop().create_future()
+
+
+LEDGER_HOLDINGS_SUBJECT = "control.ledger.holdings"
+
+
+def ledger_holdings_reply(ledger: LedgerDB, data: bytes) -> dict[str, Any]:
+    """Reply for ``control.ledger.holdings`` {"strategy": name}: that
+    strategy's own holdings from the ledger (read-only) — what a strategy
+    container seeds its PnLCalc with at start-up.  A strategy with no
+    orders yet gets an empty list."""
+    try:
+        name = str(json.loads(data or b"{}")["strategy"])
+    except (KeyError, ValueError, TypeError) as exc:
+        return {"error": f"bad request: {exc}"}
+    return {
+        "strategy": name,
+        "holdings": [
+            {
+                "exchange": h.exchange,
+                "symbol": h.symbol,
+                "quantity": str(h.quantity),
+                "avg_entry_price": str(h.avg_entry_price),
+                "realized_pnl": str(h.realized_pnl),
+                "fees_paid": str(h.fees_paid),
+            }
+            for h in ledger.holdings(name)
+        ],
+    }
+
+
+async def _serve_ledger_queries(nc: nats.aio.client.Client, ledger: LedgerDB) -> None:
+    async def _holdings(msg: nats.aio.msg.Msg) -> None:
+        await msg.respond(json.dumps(ledger_holdings_reply(ledger, msg.data)).encode())
+
+    await nc.subscribe(LEDGER_HOLDINGS_SUBJECT, cb=_holdings)
+    await asyncio.get_running_loop().create_future()
+
+
 async def _publish_guard_status(
     nc: nats.aio.client.Client,
     guard_registry: StrategyGuardRegistry,
@@ -642,29 +795,56 @@ async def main() -> None:
         format="%(asctime)s  %(levelname)s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    brokers = _build_brokers()
+    brokers = build_brokers()
     target_queue: asyncio.Queue[TargetPosition] = asyncio.Queue()
     placed_queue: asyncio.Queue[tuple[str, Order]] = asyncio.Queue()
     fills_queue: asyncio.Queue[FillConfirmation] = asyncio.Queue()
 
-    guard_registry = StrategyGuardRegistry(default_max_loss=_resolve_default_max_loss())
+    ledger = LedgerDB()
+    guard_prices = BybitPrices() if GUARD_INCLUDE_UNREALIZED else None
+    guard_registry = StrategyGuardRegistry(
+        default_max_loss=_resolve_default_max_loss(),
+        ledger=ledger,
+        funding_path=Path.home() / ".qrf" / "funding.db",
+        prices=guard_prices,
+        include_unrealized=GUARD_INCLUDE_UNREALIZED,
+    )
+    log.info(
+        "guard: %s, checked after each fill and every %ss",
+        "net incl. unrealized" if GUARD_INCLUDE_UNREALIZED else "realized + funding - fees",
+        GUARD_CHECK_INTERVAL,
+    )
+    # Every 50 orders per strategy; workers/snapshot_all.py adds a daily one.
+    snapshots = SnapshotDB()
     consolidator = OrderConsolidator(
         target_queue=target_queue,
         brokers=brokers,
         default_exchange=_DEFAULT_EXCHANGE,
-        min_order_size=Decimal("1"),  # ignore sub-1-unit residuals from rounding
         placed_queue=placed_queue,
         fills_queue=fills_queue,
         order_factory=_order_factory,
         guard_registry=guard_registry,
+        ledger=ledger,
+        snapshots=snapshots,
+        order_check=INSTRUMENTS.check,
     )
+
+    # Real order-size rules for every symbol, loaded once and kept in memory.
+    counts = await INSTRUMENTS.load(brokers)
+    if counts:
+        log.info("order-size rules loaded: %s", counts)
+    else:
+        log.error(
+            "order-size rules could NOT be loaded — only %s can be traded until"
+            " they are (retrying every minute)",
+            {ex: list(s) for ex, s in _LOT_SIZE.items()},
+        )
+
+    # Finish any order a previous run left half-done, before taking new ones.
+    await consolidator.recover_unfinished()
 
     nc = await nats.connect(NATS_URL)
     try:
-        # Seed consolidator with live broker positions so that restarts while
-        # positions are open do not produce spurious orders.
-        await consolidator.seed_from_broker()
-
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_bridge_targets(nc, target_queue))
             tg.create_task(consolidator.run())
@@ -675,9 +855,19 @@ async def main() -> None:
             tg.create_task(_serve_replay_requests(nc, brokers))
             tg.create_task(_sync_guard_config(guard_registry))
             tg.create_task(_publish_guard_status(nc, guard_registry))
+            tg.create_task(_check_guards_periodically(guard_registry, GUARD_CHECK_INTERVAL))
+            tg.create_task(_serve_guard_control(nc, guard_registry))
+            tg.create_task(_serve_ledger_queries(nc, ledger))
+            tg.create_task(_refresh_instruments(brokers))
+            tg.create_task(_serve_instruments(nc))
     finally:
         for broker in brokers.values():
             await broker.aclose()
+        if guard_prices is not None:
+            await guard_prices.aclose()
+        guard_registry.close()
+        ledger.close()
+        snapshots.close()
         await nc.drain()
 
 

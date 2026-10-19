@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, cast
 
 from data.types import DollarBar, FundingRate, TickBar, TimeBar, Trade, VolumeBar
-from execution.types import FillConfirmation, Order
+from execution.types import FillConfirmation, FillStatus, Order
 from interfaces.signals import TargetPosition
 
 if TYPE_CHECKING:
@@ -117,19 +117,38 @@ def encode_fill(fill: FillConfirmation) -> bytes:
             "quantity": str(fill.quantity),
             "fill_price": str(fill.fill_price),
             "exchange": fill.exchange,
+            "status": fill.status,
+            "requested_qty": (
+                str(fill.requested_qty) if fill.requested_qty is not None else None
+            ),
+            "fees": {coin: str(amount) for coin, amount in fill.fees.items()},
+            "order_id": fill.order_id,
+            "order_link_id": fill.order_link_id,
+            "reason": fill.reason,
         }
     ).encode()
 
 
 def decode_fill(data: bytes) -> FillConfirmation:
-    """Deserialize JSON bytes back to a FillConfirmation."""
-    d: dict[str, str] = json.loads(data)
+    """Deserialize JSON bytes back to a FillConfirmation.
+
+    Fields added after the first version are optional, so messages from an
+    older consolidator still decode (as a plain ``FILLED``).
+    """
+    d: dict[str, typing.Any] = json.loads(data)
+    requested = d.get("requested_qty")
     return FillConfirmation(
         strategy_id=d["strategy_id"],
         symbol=d["symbol"],
         quantity=Decimal(d["quantity"]),
         fill_price=Decimal(d["fill_price"]),
         exchange=d.get("exchange", ""),
+        status=FillStatus(d.get("status") or FillStatus.FILLED),
+        requested_qty=Decimal(requested) if requested is not None else None,
+        fees={coin: Decimal(amount) for coin, amount in (d.get("fees") or {}).items()},
+        order_id=d.get("order_id"),
+        order_link_id=d.get("order_link_id"),
+        reason=d.get("reason"),
     )
 
 

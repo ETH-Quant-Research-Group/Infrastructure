@@ -1,3 +1,12 @@
+"""OBSOLETE — not used, and can't currently be instantiated.
+
+``BaseBroker`` (``interfaces/broker.py``) now requires ``order_status``,
+``order_history``, ``list_positions``, ``instrument_rules``,
+``funding_settlements`` and ``cancel_order(order_id, symbol)``, which this
+broker doesn't implement.  Kept as it was; implement those (from Lighter's
+API) before using it again.
+"""
+
 from __future__ import annotations
 
 import logging

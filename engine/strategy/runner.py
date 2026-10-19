@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -9,12 +10,17 @@ from interfaces.signals import TargetPosition
 
 if TYPE_CHECKING:
     import asyncio
+    from collections.abc import Iterable
+    from datetime import datetime
 
+    from data.types import AnyBar
     from engine.strategy.guard import StrategyGuard
     from engine.strategy.pnl_calc import PnLCalc
     from engine.types import BusEvent, BusProtocol
     from execution.types import FillConfirmation
     from interfaces.strategy import BaseStrategy
+
+log = logging.getLogger(__name__)
 
 
 class StrategyRunner:
@@ -55,27 +61,68 @@ class StrategyRunner:
         # a delta-neutral strategy's perp short and spot long on the same symbol
         # are tracked independently and the guard can flatten each leg correctly.
         self._cum_position: dict[tuple[str, str], Decimal] = {}
+        # (symbol, bar type, interval) → open time of the newest start-up
+        # history bar: live bars up to it were already seen as history.
+        self._history_until: dict[tuple[str, str, int | None], datetime] = {}
 
     @property
     def pnl_calc(self) -> PnLCalc:
         return self._pnlcalc
 
-    async def run(self) -> None:
-        """Subscribe, start the strategy, and process events until cancelled."""
+    async def run(self, history: Iterable[AnyBar] = ()) -> None:
+        """Subscribe, start the strategy, feed it *history*, then process
+        live events until cancelled.
+
+        *history* (past bars, oldest first) goes to the strategy's
+        ``on_history_bar`` — after ``on_start``, before the first live
+        event, and never to ``on_bar``, so nothing is traded on it.  Live
+        bars arriving meanwhile wait in the queue; one that the history
+        already covered is skipped, so no bar is seen twice.
+        """
         queue = self._bus.subscribe(*self._topics)
-        self._strategy.on_start()
+        self.begin(history)
         try:
             while True:
-                event = await queue.get()
-                result = self._dispatch(event)
-                await self._emit(result)
+                await self.process(await queue.get())
         finally:
             self._strategy.on_stop()
             self._bus.unsubscribe(queue)
 
+    def begin(self, history: Iterable[AnyBar] = ()) -> None:
+        """``on_start``, then *history* to ``on_history_bar`` — the start of
+        :meth:`run`, also used by the backtest, which drives the runner one
+        event at a time."""
+        self._strategy.on_start()
+        for bar in history:
+            self._warm_up(bar)
+
+    async def process(self, event: BusEvent) -> None:
+        """Hand one live event to the strategy and emit what it returns."""
+        await self._emit(self._dispatch(event))
+
+    @staticmethod
+    def _bar_key(bar: AnyBar) -> tuple[str, str, int | None]:
+        return (bar.symbol, type(bar).__name__, getattr(bar, "interval_seconds", None))
+
+    def _warm_up(self, bar: AnyBar) -> None:
+        self._last_price[bar.symbol] = bar.close
+        self._pnlcalc.update_market_price(bar.symbol, bar.close)
+        key = self._bar_key(bar)
+        if key not in self._history_until or bar.timestamp > self._history_until[key]:
+            self._history_until[key] = bar.timestamp
+        result = self._strategy.on_history_bar(bar)  # type: ignore[func-returns-value]
+        if result is not None:
+            log.warning(
+                "%s: on_history_bar returned %r — ignored, history is never traded",
+                self._strategy_id, result,
+            )
+
     def _dispatch(self, event: BusEvent) -> TargetPosition | None:
         match event:
             case TimeBar() | TickBar() | VolumeBar() | DollarBar():
+                covered = self._history_until.get(self._bar_key(event))
+                if covered is not None and event.timestamp <= covered:
+                    return None  # already seen in the start-up history
                 self._last_price[event.symbol] = event.close
                 self._pnlcalc.update_market_price(event.symbol, event.close)
                 return self._strategy.on_bar(event)

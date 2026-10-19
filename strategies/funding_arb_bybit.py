@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, ClassVar
 
@@ -215,7 +215,7 @@ class FundingArbBybitStrategy(BaseStrategy):
                 self._fill_state[sym] = "hedged"
                 self._perp_qty[sym] = float(perp_qty)
                 self._spot_qty[sym] = float(spot_qty)
-                self._last_period_time[sym] = datetime.now(UTC)
+                self._last_period_time[sym] = self.now()
                 log.info(
                     "[FundingArbBybit:%s] restored state=hedged  perp=%s  spot=%s",
                     sym, perp_qty, spot_qty,
@@ -227,7 +227,7 @@ class FundingArbBybitStrategy(BaseStrategy):
                 self._fill_state[sym] = "hedged"
                 self._perp_qty[sym] = float(perp_qty)
                 self._spot_qty[sym] = 0.0
-                self._last_period_time[sym] = datetime.now(UTC)
+                self._last_period_time[sym] = self.now()
                 log.warning(
                     "[FundingArbBybit:%s] restored state=hedged (NO SPOT) perp=%s"
                     " — will auto-rehedge on next funding tick",
@@ -315,7 +315,7 @@ class FundingArbBybitStrategy(BaseStrategy):
 
         periods_per_yr = (24.0 / self._params["period_hours"]) * 365.0
         ann_rate = current_rate * periods_per_yr
-        now = datetime.now(UTC)
+        now = self.now()
 
         # ----- Watchdog: detect stuck pending signals -----
         # A pending state ("entering"/"exiting") with no fill confirmation
@@ -465,7 +465,7 @@ class FundingArbBybitStrategy(BaseStrategy):
             # the strategy's view of its hedge until the spot-fill on_fill
             # arrives (at which point we'll trust the actual fill quantity).
             self._spot_qty[sym] = perp_filled
-            self._pending_signal_at[sym] = datetime.now(UTC)
+            self._pending_signal_at[sym] = self.now()
             log.info(
                 "[FundingArbBybit:%s] PERP FILL confirmed qty=%s → buying spot %.6f",
                 sym, fill.quantity, spot_qty,
@@ -502,7 +502,7 @@ class FundingArbBybitStrategy(BaseStrategy):
             if spot_qty > 0:
                 self._fill_state[sym] = "flat"
                 self._spot_qty[sym] = 0.0
-                self._pending_signal_at[sym] = datetime.now(UTC)
+                self._pending_signal_at[sym] = self.now()
                 log.info(
                     "[FundingArbBybit:%s] PERP CLOSE confirmed — selling spot %.8f",
                     sym, spot_qty,
@@ -689,7 +689,7 @@ class FundingArbBybitStrategy(BaseStrategy):
         self._holding_periods[sym] = 0
         self._last_period_time[sym] = None
         self._fill_state[sym] = "exiting"
-        self._pending_signal_at[sym] = datetime.now(UTC)
+        self._pending_signal_at[sym] = self.now()
 
         return TargetPosition(
             symbol=sym,

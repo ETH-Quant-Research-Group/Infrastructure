@@ -27,15 +27,26 @@ import json
 import os
 import time
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
 
 import httpx
 
+from execution.brokers._bybit_common import (
+    fetch_funding_settlements,
+    fetch_instrument_rules,
+    fetch_order_history,
+    order_lookup_params,
+    parse_order_status,
+)
 from execution.types import (
+    FundingSettlement,
+    InstrumentRules,
     Order,
     OrderResult,
     OrderSide,
+    OrderStatus,
     OrderType,
     PerpOrder,
     PerpPosition,
@@ -142,7 +153,7 @@ class BybitBroker(BaseBroker):
             "side": self._bybit_side(order.side),
             "orderType": self._bybit_order_type(order.order_type),
             "qty": str(order.quantity),
-            "clientOrderId": client_oid,
+            "orderLinkId": client_oid,
         }
         if isinstance(order, PerpOrder) and order.reduce_only:
             body["reduceOnly"] = True
@@ -155,7 +166,11 @@ class BybitBroker(BaseBroker):
         try:
             resp = await self._post("/v5/order/create", body)
         except Exception as exc:
-            return OrderResult(order_id=None, order=order, error=str(exc))
+            # Failed in transit — Bybit may still have the order; the caller
+            # can find out with order_status(client_order_id=orderLinkId).
+            return OrderResult(
+                order_id=None, order=order, error=str(exc), maybe_placed=True
+            )
 
         ret_code = resp.get("retCode", -1)
         if ret_code != 0:
@@ -166,15 +181,16 @@ class BybitBroker(BaseBroker):
         order_id = resp["result"].get("orderId", client_oid)
         return OrderResult(order_id=order_id, order=order, error=None)
 
-    async def cancel_order(self, order_id: str) -> OrderResult:
+    async def cancel_order(
+        self, order_id: str, symbol: str | None = None
+    ) -> OrderResult:
+        """Cancel one order.  Bybit requires *symbol*; without it the
+        request is refused."""
+        body: dict[str, Any] = {"category": "linear", "orderId": order_id}
+        if symbol:
+            body["symbol"] = symbol
         try:
-            resp = await self._post(
-                "/v5/order/cancel",
-                {
-                    "category": "linear",
-                    "orderId": order_id,
-                },
-            )
+            resp = await self._post("/v5/order/cancel", body)
         except Exception as exc:
             return OrderResult(order_id=order_id, order=None, error=str(exc))
 
@@ -233,6 +249,49 @@ class BybitBroker(BaseBroker):
             })
         return result
 
+    async def order_status(
+        self,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+        symbol: str | None = None,
+    ) -> OrderStatus | None:
+        """Fetch the current state of one order by ``orderId`` or ``orderLinkId``.
+
+        Checks ``/v5/order/realtime`` first (open orders + the last 500
+        closed ones), then ``/v5/order/history`` for older orders.  Returns
+        ``None`` only when Bybit confirms no such order exists; network and
+        API errors raise, so callers can't mistake "couldn't ask" for
+        "never placed".
+        """
+        params = order_lookup_params("linear", order_id, client_order_id, symbol)
+        for path in ("/v5/order/realtime", "/v5/order/history"):
+            resp = await self._get(path, params)
+            if resp.get("retCode", -1) != 0:
+                raise RuntimeError(
+                    f"Bybit {path} failed: {resp.get('retMsg', 'unknown error')}"
+                )
+            items = resp.get("result", {}).get("list", [])
+            if items:
+                return parse_order_status(items[0], fee_coin="USDT")
+        return None
+
+    async def order_history(self, start: datetime, end: datetime) -> list[OrderStatus]:
+        """Every linear order created between *start* and *end*, any status.
+        Raises on any error rather than returning a partial history."""
+        return await fetch_order_history(self._get, "linear", "USDT", start, end)
+
+    async def instrument_rules(self) -> list[InstrumentRules]:
+        """Order-size rules of every linear symbol (public endpoint).
+        Raises on any error."""
+        return await fetch_instrument_rules(self._get, "linear")
+
+    async def funding_settlements(
+        self, start: datetime, end: datetime
+    ) -> list[FundingSettlement]:
+        """Every funding payment on the account between *start* and *end*,
+        per symbol.  Raises on any error rather than returning a partial list."""
+        return await fetch_funding_settlements(self._get, start, end)
+
     async def open_orders(self, symbol: str | None = None) -> list[Order]:
         params: dict[str, Any] = {"category": "linear", "limit": "50"}
         if symbol:
@@ -254,7 +313,7 @@ class BybitBroker(BaseBroker):
                     order_type=ot,
                     quantity=Decimal(o["qty"]),
                     price=Decimal(o.get("price") or "0"),
-                    client_order_id=o.get("clientOrderId"),
+                    client_order_id=o.get("orderLinkId") or None,
                 )
             )
         return orders

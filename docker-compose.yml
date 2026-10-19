@@ -53,7 +53,8 @@ services:
       - nats
 
   # ---------------------------------------------------------------------
-  # Consolidator + brokers — nets strategy signals and places live orders.
+  # Consolidator + brokers — turns strategy signals into tagged orders and
+  # reports the real fills back.
   # ---------------------------------------------------------------------
   consolidator:
     image: infra-worker:latest
@@ -68,10 +69,37 @@ services:
       # engine/order/guard_registry.py) — including compose-managed
       # strategy-* services, which don't go through that form at all.
       DEFAULT_MAX_LOSS: ${DEFAULT_MAX_LOSS:-1000}
+      # What the guard counts: false = realized + funding − fees; true = also
+      # unrealized at live prices. Re-checked after each fill and every
+      # GUARD_CHECK_INTERVAL seconds. See engine/order/guard_registry.py.
+      GUARD_INCLUDE_UNREALIZED: ${GUARD_INCLUDE_UNREALIZED:-false}
+      GUARD_CHECK_INTERVAL: ${GUARD_CHECK_INTERVAL:-30}
     volumes:
       - webapp_data:/root/.qrf
     depends_on:
       - nats
+
+  # ---------------------------------------------------------------------
+  # Strategy info — live info (holdings, PnL, last trades) about the
+  # strategies in STRATEGY_INFO_NAMES / STRATEGY_INFO_IDS, written every few
+  # seconds to /root/.qrf/strategy_info.json. Reads the ledger without
+  # writing; more strategies can be added over NATS
+  # (control.strategy_info.add). See workers/strategy_info.py.
+  # ---------------------------------------------------------------------
+  strategy-info:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_info"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: *worker-env
+      STRATEGY_INFO_NAMES: ${STRATEGY_INFO_NAMES:-}
+      STRATEGY_INFO_IDS: ${STRATEGY_INFO_IDS:-}
+    volumes:
+      - webapp_data:/root/.qrf
+    depends_on:
+      - nats
+      - consolidator
 
   # ---------------------------------------------------------------------
   # Webapp — REST API, WebSocket feed, and the built frontend.
