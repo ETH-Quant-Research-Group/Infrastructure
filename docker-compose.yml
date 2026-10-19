@@ -27,8 +27,8 @@ services:
     image: nats:2.10-alpine
     restart: unless-stopped
     networks: [app]
-    ports:
-      - "4222:4222"
+    # Not published: every client is on infra-net and reaches it as nats:4222.
+    # Publishing 4222 would expose the bus (and thus order flow) to the internet.
 
   # ---------------------------------------------------------------------
   # Data streams — pulls market data from exchanges, publishes to NATS.
@@ -106,7 +106,7 @@ services:
     restart: unless-stopped
     networks: [app]
     ports:
-      - "${OAUTH2_PROXY_PORT:-4180}:4180"
+      - "127.0.0.1:${OAUTH2_PROXY_PORT:-4180}:4180"  # nginx/cloudflared only
     environment:
       OAUTH2_PROXY_PROVIDER: github
       OAUTH2_PROXY_GITHUB_ORG: ${GITHUB_ORG:-ETH-Quant-Research-Group}
