@@ -20,6 +20,7 @@ import logging
 import os
 from datetime import UTC, datetime
 import pkgutil
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 import nats
@@ -50,6 +51,25 @@ def _load_strategy(name: str) -> type[BaseStrategy]:
                 return cls
 
     raise RuntimeError(f"Strategy '{name}' not found in the strategies package")
+
+
+def _resolve_max_loss(strategy_cls: type[BaseStrategy]) -> Decimal:
+    """MAX_DRAWDOWN env var overrides the strategy's own default when set —
+    e.g. by the /internal Deploy page's "Max drawdown" field. Falls back to
+    ``strategy_cls.max_loss`` if unset or not a valid number.
+    """
+    raw = os.environ.get("MAX_DRAWDOWN", "").strip()
+    if not raw:
+        return strategy_cls.max_loss
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        log.warning(
+            "MAX_DRAWDOWN=%r is not a valid number — using strategy default %s",
+            raw,
+            strategy_cls.max_loss,
+        )
+        return strategy_cls.max_loss
 
 
 async def _forward_targets(
@@ -117,6 +137,7 @@ async def _publish_heartbeat_periodically(
 async def _publish_registration_periodically(
     nc: nats.aio.client.Client,
     strategy_cls: type[BaseStrategy],
+    max_loss: Decimal,
     interval: float = 10.0,
 ) -> None:
     """Re-broadcast strategy registration so the dashboard recovers after a restart."""
@@ -125,7 +146,7 @@ async def _publish_registration_periodically(
             "name": strategy_cls.__name__,
             "display_name": getattr(strategy_cls, "display_name", strategy_cls.__name__),
             "topics": list(strategy_cls.topics),
-            "max_loss": str(strategy_cls.max_loss),
+            "max_loss": str(max_loss),
         }
     ).encode()
     while True:
@@ -214,10 +235,16 @@ async def main() -> None:
     strategy_cls = _load_strategy(strategy_name)
     log.info("loaded strategy %s", strategy_cls.__name__)
 
-    strategy_id = strategy_cls.__name__
+    # STRATEGY_ID (set by manager/deploy_server.py at deploy time, matching
+    # the admin-chosen deploy name) takes priority over the class name so
+    # the consolidator's guard config — keyed by that same deploy name — is
+    # guaranteed to line up with whatever this worker actually publishes
+    # under. Falls back to the class name for compose-managed strategies,
+    # which don't go through the /internal deploy flow.
+    strategy_id = os.environ.get("STRATEGY_ID", "").strip() or strategy_cls.__name__
     bus = NatsBus()
     target_queue: asyncio.Queue[TargetPosition] = asyncio.Queue()
-    guard = StrategyGuard(max_loss=strategy_cls.max_loss)
+    guard = StrategyGuard(max_loss=_resolve_max_loss(strategy_cls))
     pnl_calc = PnLCalc()
 
     # Seed PnLCalc with current open positions from Bybit so that unrealized PnL
@@ -292,7 +319,7 @@ async def main() -> None:
                     "name": strategy_cls.__name__,
                     "display_name": getattr(strategy_cls, "display_name", strategy_cls.__name__),
                     "topics": list(strategy_cls.topics),
-                    "max_loss": str(strategy_cls.max_loss),
+                    "max_loss": str(guard.max_loss),
                 }
             ).encode(),
         )
@@ -309,8 +336,12 @@ async def main() -> None:
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
             tg.create_task(_bridge_broker_pnl_to_strategy(nc, strategy_id, guard))
-            tg.create_task(_publish_heartbeat_periodically(nc, strategy_id, strategy_instance))
-            tg.create_task(_publish_registration_periodically(nc, strategy_cls))
+            tg.create_task(
+                _publish_heartbeat_periodically(nc, strategy_id, strategy_instance)
+            )
+            tg.create_task(
+                _publish_registration_periodically(nc, strategy_cls, guard.max_loss)
+            )
     finally:
         await nc.publish(f"strategy.unregister.{strategy_cls.__name__}", b"")
         for topic in strategy_cls.topics:

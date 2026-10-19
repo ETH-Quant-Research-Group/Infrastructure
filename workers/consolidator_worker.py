@@ -27,20 +27,22 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import nats
 import nats.aio.client
 import nats.aio.msg
 
 from config import NATS_URL
-from dashboard.persistence import DashboardDB
 from engine.data import codec
 from engine.order.consolidator import OrderConsolidator
+from engine.order.guard_registry import StrategyGuardRegistry
 from execution.brokers.bybit import BybitBroker
 from execution.brokers.bybit_spot import BybitSpotBroker
 from execution.types import FillConfirmation, Order, OrderSide, OrderType, PerpOrder
+from webapp.persistence import DashboardDB
 
 if TYPE_CHECKING:
     from interfaces.broker import BaseBroker
@@ -49,6 +51,19 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_demo").lower()
+
+# Never published to the host — reachable only inside the compose network,
+# same as webapp/api/deploy.py's use of this same URL.
+_MANAGER_URL = "http://manager:9000"
+
+
+def _resolve_default_max_loss() -> Decimal:
+    raw = os.getenv("DEFAULT_MAX_LOSS", "1000").strip()
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        log.warning("DEFAULT_MAX_LOSS=%r is not a valid number — using 1000", raw)
+        return Decimal("1000")
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +81,12 @@ _DEFAULT_EXCHANGE = os.getenv("DEFAULT_EXCHANGE", "bybit_demo").lower()
 
 _LOT_SIZE: dict[str, dict[str, Decimal]] = {
     "bybit_demo": {
-        "ETHUSDT":  Decimal("0.01"),    # perp ETH
-        "LINKUSDT": Decimal("1"),       # perp LINK (whole contracts)
+        "ETHUSDT": Decimal("0.01"),  # perp ETH
+        "LINKUSDT": Decimal("1"),  # perp LINK (whole contracts)
     },
     "bybit_spot": {
-        "ETHUSDT":  Decimal("0.00001"), # spot ETH
-        "LINKUSDT": Decimal("0.001"),   # spot LINK
+        "ETHUSDT": Decimal("0.00001"),  # spot ETH
+        "LINKUSDT": Decimal("0.001"),  # spot LINK
     },
 }
 
@@ -98,7 +113,9 @@ def _quantize_to_lot(quantity: Decimal, exchange: str, symbol: str) -> Decimal:
 def _build_brokers() -> dict[str, BaseBroker]:
     """Instantiate every broker that should be active for this run."""
     brokers: dict[str, BaseBroker] = {
-        "bybit_demo": BybitBroker(demo=True),   # requires BYBIT_API_KEY + BYBIT_API_SECRET
+        "bybit_demo": BybitBroker(
+            demo=True
+        ),  # requires BYBIT_API_KEY + BYBIT_API_SECRET
         "bybit_spot": BybitSpotBroker(demo=True),
         # "bybit":      BybitBroker(demo=False),  # live trading — be careful
     }
@@ -120,7 +137,10 @@ def _build_brokers() -> dict[str, BaseBroker]:
 
 
 def _order_factory(
-    symbol: str, side: OrderSide, quantity: Decimal, _price: Decimal,
+    symbol: str,
+    side: OrderSide,
+    quantity: Decimal,
+    _price: Decimal,
     exchange: str = "",
 ) -> Order:
     # Quantize DOWN to the instrument's lot size.  ROUND_DOWN guarantees we
@@ -224,7 +244,8 @@ async def _publish_state(
                 else:
                     symbols = consolidator.tracked_symbols_for(exchange)
                     positions_by_broker[exchange] = [
-                        p for s in symbols
+                        p
+                        for s in symbols
                         if (p := await broker.position(s)) is not None
                     ]
             except Exception as exc:
@@ -242,14 +263,16 @@ async def _publish_state(
         snapshot: list[dict[str, Any]] = []
         for exchange, positions in positions_by_broker.items():
             for pos in positions:
-                snapshot.append({
-                    "symbol": pos.symbol,
-                    "exchange": exchange,
-                    "quantity": str(pos.quantity),
-                    "avg_entry_price": str(pos.avg_entry_price),
-                    "unrealized_pnl": str(pos.unrealized_pnl),
-                    "realized_pnl": str(pos.realized_pnl),
-                })
+                snapshot.append(
+                    {
+                        "symbol": pos.symbol,
+                        "exchange": exchange,
+                        "quantity": str(pos.quantity),
+                        "avg_entry_price": str(pos.avg_entry_price),
+                        "unrealized_pnl": str(pos.unrealized_pnl),
+                        "realized_pnl": str(pos.realized_pnl),
+                    }
+                )
 
         # ---- Step 3: override spot unrealized using perp entry prices ----
         # Bybit spot API has no native uPnL — derive from perp entry as reference.
@@ -320,7 +343,7 @@ async def _publish_state(
                 # cumRealisedPnl in the wallet response includes every closed
                 # trade since account inception and never resets.
                 cum_realized = Decimal(0)
-                for c in (coins if isinstance(coins, list) else []):
+                for c in coins if isinstance(coins, list) else []:
                     if c.get("coin") == "USDT":
                         cum_realized = Decimal(str(c.get("cumRealisedPnl", "0") or "0"))
                         break
@@ -336,25 +359,32 @@ async def _publish_state(
                     if persisted is not None:
                         _baselines[realized_key] = Decimal(persisted)
                         log.info(
-                            "Loaded persisted baseline for %s: %s (since-inception REALIZED preserved)",
-                            exchange, persisted,
+                            "Loaded persisted baseline for %s: %s "
+                            "(since-inception REALIZED preserved)",
+                            exchange,
+                            persisted,
                         )
                     else:
                         _baselines[realized_key] = cum_realized
                         db.set_kv(db_key, str(cum_realized))
                         log.info(
                             "Set initial baseline for %s: %s (first start ever)",
-                            exchange, cum_realized,
+                            exchange,
+                            cum_realized,
                         )
                 pnl_realized = cum_realized - _baselines[realized_key]
                 pnl_total = pnl_realized + pnl_unrealized
 
                 # AUM = totalEquity minus spot-coin values (tracked separately)
-                spot_usd = Decimal(str(sum(
-                    float(c.get("usdValue", 0) or 0)
-                    for c in (coins if isinstance(coins, list) else [])
-                    if c.get("coin") not in ("USDT", "USDC")
-                )))
+                spot_usd = Decimal(
+                    str(
+                        sum(
+                            float(c.get("usdValue", 0) or 0)
+                            for c in (coins if isinstance(coins, list) else [])
+                            if c.get("coin") not in ("USDT", "USDC")
+                        )
+                    )
+                )
                 perp_equity = total_equity - spot_usd
 
                 total_realized += pnl_realized
@@ -371,7 +401,9 @@ async def _publish_state(
                     "timestamp": ts,
                 }
 
-            elif hasattr(broker, "total_realized_pnl") and hasattr(broker, "total_unrealized_pnl"):
+            elif hasattr(broker, "total_realized_pnl") and hasattr(
+                broker, "total_unrealized_pnl"
+            ):
                 # Fallback for paper broker
                 realized = broker.total_realized_pnl
                 unrealized = broker.total_unrealized_pnl
@@ -391,14 +423,112 @@ async def _publish_state(
         # Aggregate across all brokers
         await nc.publish(
             "broker.pnl",
-            json.dumps({
-                "exchange": "all",
-                "total_realized": str(total_realized),
-                "total_unrealized": str(total_unrealized),
-                "total": str(total_realized + total_unrealized),
-                "timestamp": ts,
-            }).encode(),
+            json.dumps(
+                {
+                    "exchange": "all",
+                    "total_realized": str(total_realized),
+                    "total_unrealized": str(total_unrealized),
+                    "total": str(total_realized + total_unrealized),
+                    "timestamp": ts,
+                }
+            ).encode(),
         )
+
+
+async def _sync_guard_config(
+    guard_registry: StrategyGuardRegistry,
+    interval: float = 10.0,
+) -> None:
+    """Poll the manager for admin-configured max_loss per deployed strategy,
+    and hard-stop any container whose guard has just tripped.
+
+    Polling the manager (rather than trusting anything published by a
+    strategy's own container) is deliberate: the manager is the only source
+    allowed to say what max_loss should be — it reflects exactly what the
+    admin set on the /internal Deploy page. A strategy image cannot grant
+    itself a bigger loss allowance than the fund's default this way.
+    """
+    async with httpx.AsyncClient(base_url=_MANAGER_URL, timeout=10) as client:
+        while True:
+            await asyncio.sleep(interval)
+
+            deployed_names: set[str] = set()
+            try:
+                resp = await client.get("/deployed")
+                resp.raise_for_status()
+                for record in resp.json().get("deployed", []):
+                    deployed_names.add(record["name"])
+                    raw = (record.get("env") or {}).get("MAX_DRAWDOWN", "").strip()
+                    max_loss = guard_registry.default_max_loss
+                    if raw:
+                        try:
+                            max_loss = Decimal(raw)
+                        except InvalidOperation:
+                            log.warning(
+                                "MAX_DRAWDOWN=%r for %r is not a valid number — "
+                                "using default %s",
+                                raw,
+                                record["name"],
+                                max_loss,
+                            )
+                    # Always configure (even at the default) so a strategy is
+                    # known to the registry — and shows up in the Network
+                    # page's guard status — from the moment it's deployed,
+                    # not only after its first fill.
+                    guard_registry.configure(record["name"], max_loss)
+            except httpx.HTTPError as exc:
+                log.warning("could not sync guard config from manager: %s", exc)
+
+            for strategy_id in guard_registry.pop_newly_tripped():
+                if strategy_id not in deployed_names:
+                    # Not something manager deployed (e.g. a compose-managed
+                    # strategy-* service) — the financial halt already
+                    # applied in the consolidator; there's just no container
+                    # for manager to stop here.
+                    log.warning(
+                        "guard TRIPPED for strategy_id=%r (not manager-deployed "
+                        "— signals are halted but its container keeps running)",
+                        strategy_id,
+                    )
+                    continue
+                try:
+                    resp = await client.post(f"/stop/{strategy_id}")
+                    if resp.status_code >= 400:
+                        log.error(
+                            "manager refused to stop %r: %s", strategy_id, resp.text
+                        )
+                    else:
+                        log.warning(
+                            "guard trip: stopped container for strategy_id=%r",
+                            strategy_id,
+                        )
+                except httpx.HTTPError as exc:
+                    log.error(
+                        "could not stop tripped strategy %r via manager: %s",
+                        strategy_id,
+                        exc,
+                    )
+
+
+async def _publish_guard_status(
+    nc: nats.aio.client.Client,
+    guard_registry: StrategyGuardRegistry,
+    interval: float = 5.0,
+) -> None:
+    """Broadcast ``strategy.guard.<id>`` for every strategy currently not
+    halted. The Network page's ACTIVE/HALTED badge (webapp/frontend/src/
+    subpage/Network.jsx) treats recent presence of this subject as the real
+    guard signal — unlike ``strategy.heartbeat.<id>``, which only proves the
+    container is alive, not that its signals are actually being acted on. A
+    halted strategy simply stops appearing here, so the badge goes stale and
+    flips red within one TTL window, whether or not the container itself
+    is still running (e.g. a halted compose-managed strategy that manager
+    can't stop).
+    """
+    while True:
+        await asyncio.sleep(interval)
+        for strategy_id in guard_registry.active_ids():
+            await nc.publish(f"strategy.guard.{strategy_id}", b"")
 
 
 async def _publish_fills(
@@ -445,15 +575,17 @@ async def _replay_recent_orders(
             # Only replay today's orders — skip older history
             if f.get("created_time", "") != today:
                 continue
-            payload = json.dumps({
-                "symbol": f.get("symbol", ""),
-                "side": f.get("side", ""),
-                "order_type": f.get("order_type", ""),
-                "quantity": f.get("quantity", "0"),
-                "price": f.get("price", "0"),
-                "reduce_only": f.get("reduce_only", False),
-                "exchange": exchange,
-            }).encode()
+            payload = json.dumps(
+                {
+                    "symbol": f.get("symbol", ""),
+                    "side": f.get("side", ""),
+                    "order_type": f.get("order_type", ""),
+                    "quantity": f.get("quantity", "0"),
+                    "price": f.get("price", "0"),
+                    "reduce_only": f.get("reduce_only", False),
+                    "exchange": exchange,
+                }
+            ).encode()
             symbol = f.get("symbol", "unknown")
             await nc.publish(f"orders.placed.{exchange}.{symbol}", payload)
             published += 1
@@ -507,7 +639,7 @@ async def _feed_market_prices(
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s  %(name)s  %(message)s",
+        format="%(asctime)s  %(levelname)s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
     brokers = _build_brokers()
@@ -515,6 +647,7 @@ async def main() -> None:
     placed_queue: asyncio.Queue[tuple[str, Order]] = asyncio.Queue()
     fills_queue: asyncio.Queue[FillConfirmation] = asyncio.Queue()
 
+    guard_registry = StrategyGuardRegistry(default_max_loss=_resolve_default_max_loss())
     consolidator = OrderConsolidator(
         target_queue=target_queue,
         brokers=brokers,
@@ -523,6 +656,7 @@ async def main() -> None:
         placed_queue=placed_queue,
         fills_queue=fills_queue,
         order_factory=_order_factory,
+        guard_registry=guard_registry,
     )
 
     nc = await nats.connect(NATS_URL)
@@ -539,6 +673,8 @@ async def main() -> None:
             tg.create_task(_publish_state(nc, consolidator, interval=1.0))
             tg.create_task(_feed_market_prices(nc, brokers))
             tg.create_task(_serve_replay_requests(nc, brokers))
+            tg.create_task(_sync_guard_config(guard_registry))
+            tg.create_task(_publish_guard_status(nc, guard_registry))
     finally:
         for broker in brokers.values():
             await broker.aclose()

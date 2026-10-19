@@ -214,5 +214,4 @@ __marimo__/
 tests/notebooks
 
 node_modules/
-package-lock.json
 .env
