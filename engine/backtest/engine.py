@@ -178,12 +178,16 @@ async def run_backtest(
     capital: Decimal = Decimal(60_000),
     max_loss: Decimal | None = None,
     include_unrealized: bool = False,
+    unrealized_every: int = 0,
+    close_on_trip: bool = False,
     slippage_bps: Decimal = Decimal(0),
     perp_fee: Decimal = Decimal("0.00055"),
     spot_fee: Decimal = Decimal("0.001"),
 ) -> BacktestResult:
     """Run *strategy* through *data* and return the result.  The ledger and
-    funding files go into *workdir* (kept, for inspection)."""
+    funding files go into *workdir* (kept, for inspection).  The guard is
+    checked after every event; *unrealized_every* counts those checks
+    (live counts its timer checks instead)."""
     name = type(strategy).__name__
     workdir.mkdir(parents=True, exist_ok=True)
     first = min(
@@ -207,6 +211,7 @@ async def run_backtest(
     guard = StrategyGuardRegistry(
         limit, ledger=ledger, funding_path=funding_path,
         prices=sim.price, include_unrealized=include_unrealized,
+        unrealized_every=unrealized_every, close_on_trip=close_on_trip,
     )
 
     def order_factory(
@@ -307,6 +312,8 @@ async def run_backtest(
         await runner.process(event)
         await drain()
         await guard.check_all()
+        consolidator.close_tripped()
+        await consolidator.run_waiting_closes()
         await drain()
         record_point()
     strategy.on_stop()

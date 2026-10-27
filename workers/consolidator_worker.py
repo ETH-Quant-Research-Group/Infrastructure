@@ -79,12 +79,33 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-# Guard (engine/order/guard_registry.py): count unrealized PnL too, or only
-# realized + funding − fees; and how often to re-check every strategy.
+# Guard (engine/order/guard_registry.py):
+# - GUARD_CHECK_INTERVAL: re-check every strategy every this many seconds.
+# - GUARD_UNREALIZED_EVERY: every x-th of those checks also counts unrealized
+#   PnL at fresh prices (0 = never); the others count realized + funding − fees.
+# - GUARD_INCLUDE_UNREALIZED: count unrealized on every check (the old switch).
+# - GUARD_CLOSE_ON_TRIP: a trip also closes the tripped strategy's own
+#   positions — the default; per strategy, CLOSE_ON_TRIP in its deploy env.
 GUARD_INCLUDE_UNREALIZED = _env_flag("GUARD_INCLUDE_UNREALIZED", default=False)
 GUARD_CHECK_INTERVAL = float(os.getenv("GUARD_CHECK_INTERVAL", "30"))
+GUARD_UNREALIZED_EVERY = int(os.getenv("GUARD_UNREALIZED_EVERY", "0"))
+GUARD_CLOSE_ON_TRIP = _env_flag("GUARD_CLOSE_ON_TRIP", default=False)
 GUARD_RESET_SUBJECT = "control.guard.reset"
 GUARD_STATUS_SUBJECT = "control.guard.status"
+GUARD_CLOSE_SUBJECT = "control.guard.close"
+
+
+def _parse_close_on_trip(raw: str | None) -> bool | None:
+    """A deploy env's CLOSE_ON_TRIP → True / False, or None (unset or not
+    understood: use GUARD_CLOSE_ON_TRIP)."""
+    value = (raw or "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value:
+        log.warning("CLOSE_ON_TRIP=%r not understood — using the default", raw)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +532,13 @@ async def _sync_guard_config(
                     # known to the registry — and shows up in the Network
                     # page's guard status — from the moment it's deployed,
                     # not only after its first fill.
-                    guard_registry.configure(record["name"], max_loss)
+                    guard_registry.configure(
+                        record["name"],
+                        max_loss,
+                        close_on_trip=_parse_close_on_trip(
+                            (record.get("env") or {}).get("CLOSE_ON_TRIP")
+                        ),
+                    )
             except httpx.HTTPError as exc:
                 log.warning("could not sync guard config from manager: %s", exc)
 
@@ -548,32 +575,51 @@ async def _sync_guard_config(
 
 async def _check_guards_periodically(
     guard_registry: StrategyGuardRegistry,
+    consolidator: OrderConsolidator,
     interval: float,
 ) -> None:
     """Re-check every strategy's guard, so an open position losing value
-    (GUARD_INCLUDE_UNREALIZED) or newly collected funding is caught without
-    waiting for the strategy's next fill.  A trip is acted on by
-    _sync_guard_config (stops the container)."""
+    (every GUARD_UNREALIZED_EVERY-th check) or newly collected funding is
+    caught without waiting for the strategy's next fill.  A trip is acted on
+    here (closes its positions, if it should) and by _sync_guard_config
+    (stops the container)."""
     while True:
         await asyncio.sleep(interval)
         try:
             await guard_registry.check_all()
         except Exception:
             log.exception("guard check failed")
+        consolidator.close_tripped()
 
 
 async def _serve_guard_control(
     nc: nats.aio.client.Client,
     guard_registry: StrategyGuardRegistry,
+    consolidator: OrderConsolidator,
 ) -> None:
-    """``control.guard.reset`` {"strategy": name} and ``control.guard.status``
-    — used by ``python -m workers.guard_control``."""
+    """``control.guard.reset`` / ``control.guard.close`` {"strategy": name}
+    and ``control.guard.status`` — used by ``python -m workers.guard_control``."""
 
     async def _reset(msg: nats.aio.msg.Msg) -> None:
         try:
             name = str(json.loads(msg.data or b"{}")["strategy"])
+            if guard_registry.counts_unrealized:
+                await guard_registry.refresh_prices([name])
             baseline = guard_registry.reset(name)
             reply: dict[str, Any] = {"reset": name, "baseline": str(baseline)}
+        except (KeyError, ValueError, TypeError) as exc:
+            reply = {"error": str(exc)}
+        await msg.respond(json.dumps(reply).encode())
+
+    async def _close(msg: nats.aio.msg.Msg) -> None:
+        # Only while tripped: a running strategy would just reopen them.
+        reply: dict[str, Any]
+        try:
+            name = str(json.loads(msg.data or b"{}")["strategy"])
+            if guard_registry.is_active(name):
+                raise ValueError(f"guard for {name!r} is not tripped")
+            consolidator.request_close(name)
+            reply = {"closing": name}
         except (KeyError, ValueError, TypeError) as exc:
             reply = {"error": str(exc)}
         await msg.respond(json.dumps(reply).encode())
@@ -588,6 +634,7 @@ async def _serve_guard_control(
 
     await nc.subscribe(GUARD_RESET_SUBJECT, cb=_reset)
     await nc.subscribe(GUARD_STATUS_SUBJECT, cb=_status)
+    await nc.subscribe(GUARD_CLOSE_SUBJECT, cb=_close)
     await asyncio.get_running_loop().create_future()
 
 
@@ -801,18 +848,28 @@ async def main() -> None:
     fills_queue: asyncio.Queue[FillConfirmation] = asyncio.Queue()
 
     ledger = LedgerDB()
-    guard_prices = BybitPrices() if GUARD_INCLUDE_UNREALIZED else None
+    guard_prices = (
+        BybitPrices() if GUARD_INCLUDE_UNREALIZED or GUARD_UNREALIZED_EVERY > 0 else None
+    )
     guard_registry = StrategyGuardRegistry(
         default_max_loss=_resolve_default_max_loss(),
         ledger=ledger,
         funding_path=Path.home() / ".qrf" / "funding.db",
         prices=guard_prices,
         include_unrealized=GUARD_INCLUDE_UNREALIZED,
+        unrealized_every=GUARD_UNREALIZED_EVERY,
+        close_on_trip=GUARD_CLOSE_ON_TRIP,
     )
+    if GUARD_INCLUDE_UNREALIZED:
+        unrealized = "every check"
+    elif GUARD_UNREALIZED_EVERY > 0:
+        unrealized = f"on 1 in every {GUARD_UNREALIZED_EVERY} periodic checks"
+    else:
+        unrealized = "never"
     log.info(
-        "guard: %s, checked after each fill and every %ss",
-        "net incl. unrealized" if GUARD_INCLUDE_UNREALIZED else "realized + funding - fees",
-        GUARD_CHECK_INTERVAL,
+        "guard: realized + funding - fees, checked after each fill and every %ss;"
+        " unrealized counted %s; close positions on trip by default: %s",
+        GUARD_CHECK_INTERVAL, unrealized, GUARD_CLOSE_ON_TRIP,
     )
     # Every 50 orders per strategy; workers/snapshot_all.py adds a daily one.
     snapshots = SnapshotDB()
@@ -855,8 +912,10 @@ async def main() -> None:
             tg.create_task(_serve_replay_requests(nc, brokers))
             tg.create_task(_sync_guard_config(guard_registry))
             tg.create_task(_publish_guard_status(nc, guard_registry))
-            tg.create_task(_check_guards_periodically(guard_registry, GUARD_CHECK_INTERVAL))
-            tg.create_task(_serve_guard_control(nc, guard_registry))
+            tg.create_task(
+                _check_guards_periodically(guard_registry, consolidator, GUARD_CHECK_INTERVAL)
+            )
+            tg.create_task(_serve_guard_control(nc, guard_registry, consolidator))
             tg.create_task(_serve_ledger_queries(nc, ledger))
             tg.create_task(_refresh_instruments(brokers))
             tg.create_task(_serve_instruments(nc))

@@ -14,12 +14,14 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import nats
 
 from config import NATS_URL
 from webapp import nats_bridge, store
+from webapp.api import backtest
 from webapp.app import app
 from webapp.persistence import DashboardDB
 
@@ -70,9 +72,14 @@ async def _startup() -> None:
     await nats_bridge.start(nc)
     log.info("Dashboard ready — NATS connected to %s", NATS_URL)
 
+    # ---- Backtest history: the starter set, gathered now and then daily ----
+    app.state.history_seed = asyncio.create_task(backtest.seeder.run_forever())
+
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    if hasattr(app.state, "history_seed"):
+        app.state.history_seed.cancel()
     nc: nats.aio.client.Client = app.state.nc
     try:
         await nc.drain()

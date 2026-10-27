@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from webapp.api import (
+    backtest,
     deploy,
     market,
     ops,
@@ -25,6 +26,7 @@ app.include_router(strategies.router, prefix="/api/strategies", tags=["strategie
 app.include_router(performance.router, prefix="/api/performance", tags=["performance"])
 app.include_router(topology.router, prefix="/api/topology", tags=["topology"])
 app.include_router(deploy.router, prefix="/api/deploy", tags=["deploy"])
+app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(ops.router, prefix="/api/ops", tags=["ops"])
 app.include_router(ws_router, prefix="/ws", tags=["websocket"])
 

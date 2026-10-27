@@ -15,6 +15,19 @@ Endpoints:
     GET  /status           -> every compose service + custom-deployed container
     GET  /logs/<name>      -> SSE stream of `docker logs -f` (compose service or
                                custom-deployed container, resolved by name)
+
+Backtests (mode "backtest" on the Deploy page — never a live container):
+    POST /backtest/markets {"image": str} -> what the image's strategy trades
+    POST /backtest/run     {"name", "image", "env", "runs": [{"start", "end",
+                            "interval"}]} -> SSE: each run's output + result
+    GET  /backtests        -> saved results (summaries)
+    GET  /backtests/<id>   -> one saved result, with trades and PnL curve
+
+A backtest runs the strategy image itself (`python -m workers.backtest`),
+with **no network** (`--network none`), no API key and no NATS, the history
+cache mounted read-only — so it can't place an order even by mistake. The
+guard gets the same settings as a live deploy (the run's env + the
+consolidator defaults passed to this container).
 """
 
 from __future__ import annotations
@@ -40,6 +53,21 @@ _DEFAULT_MODE = "paper"  # safer default than "live" if the field is omitted
 # Passed through to every deployed container so it can reach the rest of
 # the stack the same way the built-in strategy-* services do.
 _PASSTHROUGH_ENV = ["NATS_URL", "BYBIT_API_KEY", "BYBIT_API_SECRET", "BYBIT_DEMO"]
+
+# Backtests: the history cache volume (filled by the webapp), where results
+# are kept, and the consolidator's guard defaults passed to every run so it
+# is guarded exactly like a live deploy.  Never any key or NATS address.
+BACKTEST_DIR = "/state/backtests"
+BACKTEST_CACHE_VOLUME = os.environ.get("BACKTEST_CACHE_VOLUME", "infra-backtest-cache")
+_BACKTEST_GUARD_ENV = [
+    "DEFAULT_MAX_LOSS", "GUARD_CLOSE_ON_TRIP", "GUARD_INCLUDE_UNREALIZED",
+    "GUARD_UNREALIZED_EVERY",
+]
+_BACKTEST_INTERVALS = {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"}
+_BACKTEST_MAX_RUNS = 20
+_RESULT_PREFIX = "__RESULT__"
+_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+_DATASET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")  # as webapp/api/backtest.py
 
 
 def _state_path(name: str) -> str:
@@ -69,6 +97,67 @@ def _known_services() -> set[str]:
     if result.returncode != 0:
         return set()
     return {s.strip() for s in result.stdout.splitlines() if s.strip()}
+
+
+def _backtest_cmd(image: str, env: dict, args: list[str]) -> list[str]:
+    """`docker run` for one backtest step inside *image*: no network, no
+    key, the history cache read-only, bounded CPU / memory, removed after."""
+    cmd = [
+        "docker", "run", "--rm",
+        "--network", "none",
+        "--cpus", os.environ.get("BACKTEST_CPUS", "2"),
+        "--memory", os.environ.get("BACKTEST_MEMORY", "4g"),
+        "--label", "infra.managed=backtest",
+        "-v", f"{BACKTEST_CACHE_VOLUME}:/root/.qrf/backtest_cache:ro",
+    ]
+    for key in _BACKTEST_GUARD_ENV:
+        val = os.environ.get(key)
+        if val:
+            cmd += ["-e", f"{key}={val}"]
+    for key, val in env.items():
+        cmd += ["-e", f"{key}={val}"]
+    return [*cmd, image, "python", "-m", "workers.backtest", *args]
+
+
+def _validate_runs(runs: object) -> list[dict] | str:
+    """The requested periods, checked — or why they're refused."""
+    if not isinstance(runs, list) or not runs:
+        return "runs must be a non-empty list"
+    if len(runs) > _BACKTEST_MAX_RUNS:
+        return f"at most {_BACKTEST_MAX_RUNS} runs at a time"
+    out = []
+    for i, run in enumerate(runs, 1):
+        if not isinstance(run, dict):
+            return f"run {i}: not an object"
+        try:
+            start = datetime.fromisoformat(str(run.get("start", "")))
+            end = datetime.fromisoformat(str(run.get("end", "")))
+        except ValueError:
+            return f"run {i}: start / end must be dates like 2026-08-01"
+        if end <= start:
+            return f"run {i}: end must be after start"
+        interval = str(run.get("interval", ""))
+        if interval not in _BACKTEST_INTERVALS:
+            return f"run {i}: unsupported interval {interval!r}"
+        dataset = str(run.get("dataset") or "bybit")
+        if not _DATASET_RE.match(dataset):
+            return f"run {i}: bad dataset name {dataset!r}"
+        out.append({"start": start.isoformat(), "end": end.isoformat(), "interval": interval,
+                    "dataset": dataset})
+    return out
+
+
+def _backtest_records() -> list[dict]:
+    os.makedirs(BACKTEST_DIR, exist_ok=True)
+    records = []
+    for fname in os.listdir(BACKTEST_DIR):
+        if fname.endswith(".json"):
+            with open(os.path.join(BACKTEST_DIR, fname)) as f:
+                record = json.load(f)
+            result = record.get("result") or {}
+            record["result"] = {k: v for k, v in result.items() if k not in ("trades", "pnl")}
+            records.append(record)
+    return sorted(records, key=lambda r: r.get("created_at", ""), reverse=True)
 
 
 def _custom_deployments() -> list[dict]:
@@ -153,11 +242,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/logs/"):
             self._handle_logs(self.path.removeprefix("/logs/"))
             return
+        if self.path == "/backtests":
+            self._send_json(200, {"backtests": _backtest_records()})
+            return
+        if self.path.startswith("/backtests/"):
+            self._handle_backtest_result(self.path.removeprefix("/backtests/"))
+            return
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path == "/deploy":
             self._handle_deploy()
+            return
+        if self.path == "/backtest/markets":
+            self._handle_backtest_markets()
+            return
+        if self.path == "/backtest/run":
+            self._handle_backtest_run()
             return
         if self.path.startswith("/stop/"):
             self._handle_stop(self.path.removeprefix("/stop/"))
@@ -305,6 +406,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if mode == "backtest":
+            # A "backtest" deploy used to start a normal, live-connected
+            # container (the mode was only a label). Refused: backtests run
+            # through /backtest/run, without network.
+            self._send_json(
+                400,
+                {"error": "backtests don't deploy a container - use /backtest/run"},
+            )
+            return
+
         container = _container_name(name)
         os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -392,6 +503,113 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             self._end_sse()
+
+    # ------------------------------------------------------------ backtests
+
+    def _handle_backtest_markets(self) -> None:
+        try:
+            image = str(self._read_json().get("image", "")).strip()
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        if not image.lower().startswith(ALLOWED_IMAGE_PREFIX):
+            self._send_json(400, {"error": f"image must start with {ALLOWED_IMAGE_PREFIX!r}"})
+            return
+        pull = _run(["docker", "pull", "-q", image], timeout=900)
+        if pull.returncode != 0:
+            self._send_json(502, {"error": "docker pull failed", "detail": pull.stderr[-2000:]})
+            return
+        result = _run(_backtest_cmd(image, {}, ["--markets"]), timeout=180)
+        lines = [ln for ln in result.stdout.splitlines() if ln.startswith("{")]
+        if result.returncode != 0 or not lines:
+            output = (result.stdout + result.stderr)[-2000:]
+            hint = (
+                "this image was built before the backtester existed - rebuild it"
+                " from current main"
+                if "No module named workers.backtest" in output
+                else "the image could not report its markets"
+            )
+            self._send_json(502, {"error": hint, "detail": output})
+            return
+        self._send_json(200, json.loads(lines[-1]))
+
+    def _handle_backtest_run(self) -> None:
+        try:
+            body = self._read_json()
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"error": "invalid JSON body"})
+            return
+        name, image, env, _mode = _validate_deploy({**body, "mode": "backtest"})
+        if name is None:
+            self._send_json(400, {"error": "invalid name or image"})
+            return
+        runs = _validate_runs(body.get("runs"))
+        if isinstance(runs, str):
+            self._send_json(400, {"error": runs})
+            return
+
+        os.makedirs(BACKTEST_DIR, exist_ok=True)
+        self._start_sse()
+        try:
+            if self._stream_command(["docker", "pull", image]) != 0:
+                self._emit_event("error", detail="docker pull failed")
+                return
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+            for i, run in enumerate(runs):
+                self._emit_event("run_started", index=i, **run)
+                args = [
+                    "--live-settings", "--offline", "--json-result",
+                    "--start", run["start"], "--end", run["end"],
+                    "--interval", run["interval"], "--dataset", run["dataset"],
+                ]
+                result, code = self._stream_backtest(_backtest_cmd(image, env, args))
+                if result is None:
+                    self._emit_event("run_failed", index=i, exit_code=code)
+                    continue
+                record = {
+                    "id": f"{name}-{stamp}-{i + 1}",
+                    "name": name,
+                    "image": image,
+                    "env": env,
+                    "run": run,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "result": result,
+                }
+                with open(os.path.join(BACKTEST_DIR, f"{record['id']}.json"), "w") as f:
+                    json.dump(record, f)
+                summary = {k: v for k, v in result.items() if k not in ("trades", "pnl")}
+                self._emit_event("result", index=i, id=record["id"], run=run, result=summary)
+            self._emit_event("done")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self._end_sse()
+
+    def _stream_backtest(self, cmd: list[str]) -> tuple[dict | None, int]:
+        """Like _stream_command, but the result line is kept, not relayed."""
+        self._write_sse_chunk(f"$ {' '.join(cmd)}")
+        proc = subprocess.Popen(  # nosec B603 - shell=False, list args, see _run() above
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        result = None
+        for line in iter(proc.stdout.readline, ""):
+            if line.startswith(_RESULT_PREFIX):
+                try:
+                    result = json.loads(line[len(_RESULT_PREFIX):])
+                except json.JSONDecodeError:
+                    self._write_sse_chunk("(unreadable result line)")
+                continue
+            self._write_sse_chunk(line.rstrip("\n"))
+        proc.wait()
+        return (result if proc.returncode == 0 else None), proc.returncode
+
+    def _handle_backtest_result(self, backtest_id: str) -> None:
+        path = os.path.join(BACKTEST_DIR, f"{backtest_id}.json")
+        if not _ID_RE.match(backtest_id) or not os.path.exists(path):
+            self._send_json(404, {"error": "unknown backtest"})
+            return
+        with open(path) as f:
+            self._send_json(200, json.load(f))
 
     def _handle_stop(self, name: str) -> None:
         if not NAME_RE.match(name) or not os.path.exists(_state_path(name)):

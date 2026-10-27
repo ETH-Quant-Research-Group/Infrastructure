@@ -18,6 +18,7 @@ from execution.types import (
     OrderStatus,
     OrderType,
 )
+from interfaces.signals import TargetPosition
 
 log = logging.getLogger(__name__)
 
@@ -26,13 +27,19 @@ if TYPE_CHECKING:
     from engine.order.ledger import LedgerDB, Trade
     from engine.order.snapshots import SnapshotDB
     from interfaces.broker import BaseBroker
-    from interfaces.signals import TargetPosition
 
 OrderFactory = Callable[[str, OrderSide, Decimal, Decimal, str], Order]
 # (exchange, order, approximate price) → why it can't be sent, or None.
 # E.g. InstrumentCache.check (engine/order/instruments.py): Bybit's lot size,
 # minimum / maximum quantity and minimum order value.
 OrderCheck = Callable[[str, Order, Decimal], "str | None"]
+
+
+class _ClosePositions:
+    """Lane item: close the lane's strategy's own holdings (guard trip)."""
+
+
+_CLOSE = _ClosePositions()
 
 
 def _default_order_factory(
@@ -130,8 +137,12 @@ class OrderConsolidator:
         # strategy_id → {(exchange, symbol) → cumulative filled qty}, from real
         # fills only.  Bookkeeping for tracked_symbols; never used for sizing.
         self._positions: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(dict)
-        # strategy_id → that strategy's pending signals
-        self._lanes: dict[str, asyncio.Queue[TargetPosition]] = {}
+        # strategy_id → that strategy's pending signals (and position closes)
+        self._lanes: dict[str, asyncio.Queue[TargetPosition | _ClosePositions]] = {}
+        self._tg: asyncio.TaskGroup | None = None  # set while run() is running
+        # Closes asked for without lanes (handle(), the backtest): done after
+        # the current signal.
+        self._closes_waiting: list[str] = []
 
     @property
     def brokers(self) -> dict[str, BaseBroker]:
@@ -250,40 +261,127 @@ class OrderConsolidator:
     async def run(self) -> None:
         """Route each signal to its strategy's lane, creating lanes on demand."""
         async with asyncio.TaskGroup() as tg:
-            while True:
-                target = await self._target_queue.get()
-                lane = self._lanes.get(target.strategy_id)
-                if lane is None:
-                    lane = self._lanes[target.strategy_id] = asyncio.Queue()
-                    tg.create_task(self._run_lane(target.strategy_id, lane))
-                lane.put_nowait(target)
+            self._tg = tg
+            try:
+                while True:
+                    target = await self._target_queue.get()
+                    self._lane(target.strategy_id).put_nowait(target)
+            finally:
+                self._tg = None
+
+    def _lane(self, strategy_id: str) -> asyncio.Queue[TargetPosition | _ClosePositions]:
+        assert self._tg is not None
+        lane = self._lanes.get(strategy_id)
+        if lane is None:
+            lane = self._lanes[strategy_id] = asyncio.Queue()
+            self._tg.create_task(self._run_lane(strategy_id, lane))
+        return lane
 
     async def _run_lane(
-        self, strategy_id: str, lane: asyncio.Queue[TargetPosition]
+        self, strategy_id: str, lane: asyncio.Queue[TargetPosition | _ClosePositions]
     ) -> None:
         while True:
-            target = await lane.get()
+            item = await lane.get()
             try:
-                await self._reconcile(target)
+                if isinstance(item, _ClosePositions):
+                    await self._close_positions(strategy_id)
+                else:
+                    await self._reconcile(item)
             except Exception:
                 # One bad signal must not take down the lane (or every other
                 # strategy's lane with it).
                 log.exception(
-                    "signal handling crashed for strategy_id=%r: %s qty=%s",
+                    "signal handling crashed for strategy_id=%r: %s",
                     strategy_id,
-                    target.symbol,
-                    target.quantity,
+                    "closing positions" if isinstance(item, _ClosePositions)
+                    else f"{item.symbol} qty={item.quantity}",
                 )
+
+    # ------------------------------------------------------- closing on trip
+
+    def request_close(self, strategy_id: str) -> None:
+        """Queue closing *strategy_id*'s own holdings (from the ledger) in its
+        lane — after any order of it already in flight, so the holdings read
+        are final.  Only that strategy's positions are closed; other
+        strategies sharing the symbol keep theirs."""
+        if self._ledger is None:
+            log.error("can't close %r's positions: no ledger", strategy_id)
+            return
+        if self._tg is None:
+            self._closes_waiting.append(strategy_id)
+        else:
+            self._lane(strategy_id).put_nowait(_CLOSE)
+
+    def close_tripped(self) -> None:
+        """Queue closes for every strategy whose guard just tripped with
+        ``close_on_trip`` — called after each fill and each periodic check."""
+        if self._guard_registry is None or not hasattr(self._guard_registry, "pop_to_close"):
+            return
+        for strategy_id in self._guard_registry.pop_to_close():
+            self.request_close(strategy_id)
+
+    async def _close_positions(self, strategy_id: str) -> None:
+        """Send one order per open holding of *strategy_id* that brings it to
+        0 — tagged as its orders, recorded in its ledger, let through its
+        tripped guard.  Not reduce-only: the account's position is the sum
+        of every strategy's, so a reduce-only order could be refused (or cut)
+        when another strategy holds the other side."""
+        assert self._ledger is not None
+        if strategy_id not in self._ledger.strategy_ids():
+            log.info("guard close for %r: no orders, nothing to close", strategy_id)
+            return
+        open_ = [h for h in self._ledger.snapshot(strategy_id).holdings if h.quantity != 0]
+        if not open_:
+            log.info("guard close for %r: no open positions", strategy_id)
+            return
+        log.warning(
+            "guard close for %r: closing %s",
+            strategy_id,
+            ", ".join(f"{h.exchange}:{h.symbol} {h.quantity}" for h in open_),
+        )
+        for h in open_:
+            await self._reconcile(
+                TargetPosition(
+                    symbol=h.symbol,
+                    quantity=-h.quantity,
+                    price=h.avg_entry_price,  # only for the min-value check
+                    strategy_id=strategy_id,
+                    exchange=h.exchange,
+                ),
+                guard_close=True,
+            )
+        left = [h for h in self._ledger.snapshot(strategy_id).holdings if h.quantity != 0]
+        if left:
+            # Spot sells leave dust below the minimum order size; anything
+            # bigger means an order failed.
+            log.error(
+                "guard close for %r: still open afterwards: %s — check them; retry"
+                " with `python -m workers.guard_control close %s`",
+                strategy_id,
+                ", ".join(f"{h.exchange}:{h.symbol} {h.quantity}" for h in left),
+                strategy_id,
+            )
+        else:
+            log.warning("guard close for %r: all positions closed", strategy_id)
 
     # ------------------------------------------------------------- one signal
 
     async def handle(self, target: TargetPosition) -> None:
         """Handle one signal now, without the lanes — for the backtest,
-        which works off every signal in order itself."""
+        which works off every signal in order itself.  Closes a trip asked
+        for are done right after it."""
         await self._reconcile(target)
+        await self.run_waiting_closes()
 
-    async def _reconcile(self, target: TargetPosition) -> None:
-        """Place one signal's order, wait for the outcome, and report it."""
+    async def run_waiting_closes(self) -> None:
+        """Without lanes (the backtest): do the closes asked for so far."""
+        while self._closes_waiting:
+            await self._close_positions(self._closes_waiting.pop(0))
+
+    async def _reconcile(self, target: TargetPosition, *, guard_close: bool = False) -> None:
+        """Place one signal's order, wait for the outcome, and report it.
+        *guard_close*: an order closing a tripped strategy's position — the
+        trip doesn't block it."""
         exchange = target.exchange or self._default_exchange
         broker = self._brokers.get(exchange)
         if broker is None:
@@ -298,8 +396,10 @@ class OrderConsolidator:
         if qty_delta == Decimal(0):
             return
 
-        if self._guard_registry is not None and not self._guard_registry.is_active(
-            strategy_id
+        if (
+            not guard_close
+            and self._guard_registry is not None
+            and not self._guard_registry.is_active(strategy_id)
         ):
             # Guard tripped (or was never configured active) for this
             # strategy — the signal is not sent. Unlike the old in-process
@@ -705,5 +805,6 @@ class OrderConsolidator:
                     fill.quantity,
                     fill.fill_price,
                 )
+            self.close_tripped()
         if self._fills_queue is not None:
             self._fills_queue.put_nowait(fill)
