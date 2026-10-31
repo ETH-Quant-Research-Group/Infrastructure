@@ -218,6 +218,3 @@ node_modules/
 
 .backtest_cache/
 backtest_report/
-
-.backtest_cache/
-backtest_report/

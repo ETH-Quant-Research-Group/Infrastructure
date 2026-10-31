@@ -89,13 +89,16 @@ class MissingHistory(Exception):  # noqa: N818 - reads better at the call site
 
 
 def with_marks(rates: list[FundingRate], bars: list[TimeBar]) -> list[FundingRate]:
-    """Fill each rate's mark price with the last bar close before it."""
+    """Fill each rate's mark price with the last bar close before it, and its
+    ``next_funding_time`` with the following settlement — what the live
+    ticker shows, from which strategies learn the symbol's funding interval."""
     closes = [b.close_time for b in bars]
     out = []
-    for rate in rates:
+    for n, rate in enumerate(rates):
         i = bisect.bisect_right(closes, rate.timestamp) - 1
         if i >= 0:
-            out.append(replace(rate, mark_price=bars[i].close))
+            following = rates[n + 1].timestamp if n + 1 < len(rates) else None
+            out.append(replace(rate, mark_price=bars[i].close, next_funding_time=following))
     return out
 
 

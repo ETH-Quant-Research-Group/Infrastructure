@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -379,3 +380,16 @@ def test_command_line_refuses_an_empty_period(capsys: pytest.CaptureFixture[str]
     assert main(["--strategy", "FundingArbBybitStrategy",
                  "--start", "2026-09-02", "--end", "2026-09-01"]) == 2
     assert "--end must be after --start" in capsys.readouterr().out
+
+
+def test_funding_events_carry_next_funding_time() -> None:
+    """Like the live ticker: each settlement says when the next one is, so a
+    strategy can learn a 4h symbol's interval (funding-arb does)."""
+    bars = [_bar(i, str(100 + i)) for i in range(4)]
+    four_h = [replace(_rate(1, "0.0001"), timestamp=_T0 + _8H + k * timedelta(hours=4))
+              for k in range(3)]
+    marked = with_marks(four_h, bars)
+    assert [r.next_funding_time for r in marked] == [
+        _T0 + 12 * timedelta(hours=1), _T0 + 16 * timedelta(hours=1), None,
+    ]
+    assert [r.mark_price for r in marked] == [Decimal(100), Decimal(100), Decimal(101)]

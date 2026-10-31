@@ -104,16 +104,22 @@ def test_bybit_error_is_raised_not_swallowed():
 _CLOCK = [datetime(2026, 1, 1, tzinfo=UTC)]
 
 
-class _Clock(datetime):
-    @classmethod
-    def now(cls, tz=None):  # noqa: ANN001
+class _Clock:
+    """The strategy reads the time through ``self.now()`` → its ``clock``."""
+
+    def now(self) -> datetime:
         return _CLOCK[0]
 
 
+def _new_strategy() -> strat_mod.FundingArbBybitStrategy:
+    s = strat_mod.FundingArbBybitStrategy(symbols=("SOLUSDT",))
+    s.clock = _Clock()
+    return s
+
+
 @pytest.fixture
-def strategy(monkeypatch):
-    monkeypatch.setattr(strat_mod, "datetime", _Clock)
-    return strat_mod.FundingArbBybitStrategy(symbols=("SOLUSDT",))
+def strategy():
+    return _new_strategy()
 
 
 def nft(h: float) -> datetime:
@@ -162,5 +168,5 @@ def _feed_hourly(strategy, rate: str, interval_h: int, hours: int) -> list:
 def test_entry_uses_real_interval(strategy):
     """0.01% per settlement: 10.95% ann at 8h (below the 15% entry), 21.9% at 4h (above)."""
     assert _feed_hourly(strategy, "0.0001", interval_h=4, hours=40)    # enters
-    other = strat_mod.FundingArbBybitStrategy(symbols=("SOLUSDT",))
+    other = _new_strategy()
     assert _feed_hourly(other, "0.0001", interval_h=8, hours=40) == []  # does not

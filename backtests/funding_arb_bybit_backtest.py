@@ -5,7 +5,7 @@ the production objects exactly as the workers do and only replaces Bybit:
 
     real  strategies.funding_arb_bybit.FundingArbBybitStrategy
     real  engine.strategy.runner.StrategyRunner      (+ in-process StrategyGuard)
-    real  engine.order.consolidator.OrderConsolidator (min_order_size=1, as deployed)
+    real  engine.order.consolidator.OrderConsolidator (+ InstrumentCache rounding / order_check, as deployed)
     real  engine.order.guard_registry.StrategyGuardRegistry
     real  workers.consolidator_worker._order_factory  (lot-size quantisation)
     real  data.connectors.bybit_linear 1h fetch + _aggregate_to_8h (same 8h bars as live)
@@ -13,7 +13,7 @@ the production objects exactly as the workers do and only replaces Bybit:
           spot fee taken in base coin on buys, funding paid at every settlement
           (including 4h/1h intervals) on the mark price, unified USDT wallet.
 
-Event flow per hour (simulated clock patched into the strategy module):
+Event flow per hour (simulated clock given to the strategy as ``strategy.clock``):
     prices update -> funding settles on open perp positions ->
     at 00/08/16 UTC: 8h bar per symbol, then the settled funding rate as the
     first funding tick of the window -> strategy -> runner -> consolidator ->
@@ -74,9 +74,13 @@ from engine.strategy.guard import StrategyGuard  # noqa: E402
 from engine.strategy.pnl_calc import PnLCalc  # noqa: E402
 from engine.strategy.runner import StrategyRunner  # noqa: E402
 from execution.types import (  # noqa: E402
+    FundingSettlement,
+    InstrumentRules,
     Order,
     OrderResult,
     OrderSide,
+    OrderState,
+    OrderStatus,
     PerpOrder,
     PerpPosition,
     Position,
@@ -356,13 +360,57 @@ def _on_step(q: Decimal, step: Decimal) -> bool:
 class _SimBrokerBase(BaseBroker):
     def __init__(self, acct: SimAccount, md: MarketData, costs: Costs, clock) -> None:
         self.a, self.md, self.c, self.clock = acct, md, costs, clock
+        self._statuses: dict[str, OrderStatus] = {}   # order id / client tag -> final status
 
     def _reject(self, ex: str, order: Order, why: str) -> OrderResult:
         self.a.rejects.append({"ts": self.clock(), "exchange": ex, "symbol": order.symbol,
                                "side": str(order.side), "qty": str(order.quantity), "reason": why})
         return OrderResult(order_id=None, order=order, error=why)
 
-    async def cancel_order(self, order_id: str) -> OrderResult:
+    def _filled(self, order_id: str, order: Order, fill: Decimal,
+                fees: dict[str, Decimal]) -> OrderResult:
+        """Fills are immediate and complete: keep the final status for
+        ``order_status``, which the consolidator polls for the real fill."""
+        status = OrderStatus(
+            order_id=order_id, client_order_id=order.client_order_id, symbol=order.symbol,
+            side=order.side, state=OrderState.FILLED, quantity=order.quantity,
+            filled_qty=order.quantity, leaves_qty=D0, avg_price=fill,
+            filled_value=order.quantity * fill, fees=fees, raw_status="Filled",
+        )
+        self._statuses[order_id] = status
+        if order.client_order_id:
+            self._statuses[order.client_order_id] = status
+        return OrderResult(order_id=order_id, order=order, error=None)
+
+    async def order_status(self, order_id: str | None = None, client_order_id: str | None = None,
+                           symbol: str | None = None) -> OrderStatus | None:
+        return self._statuses.get(order_id or "") or self._statuses.get(client_order_id or "")
+
+    async def order_history(self, start: datetime, end: datetime) -> list[OrderStatus]:
+        return []
+
+    async def list_positions(self) -> list[Position]:
+        return [p for s in self.md.symbols if (p := await self.position(s)) is not None]
+
+    _RULE_KEYS: tuple[str, str, str] = ("", "", "")   # (step, min qty, min value) in md.instruments
+
+    async def instrument_rules(self) -> list[InstrumentRules]:
+        """The simulated symbols' rules, loaded into the consolidator's
+        InstrumentCache like Bybit's are live (rounding + order_check)."""
+        step, min_qty, min_value = self._RULE_KEYS
+        out = []
+        for s in self.md.symbols:
+            ins = self.md.instruments[s]
+            if Decimal(ins[step]) > 0:
+                out.append(InstrumentRules(symbol=s, qty_step=Decimal(ins[step]),
+                                           min_qty=Decimal(ins[min_qty]) or None,
+                                           min_notional=Decimal(ins[min_value]) or None))
+        return out
+
+    async def funding_settlements(self, start: datetime, end: datetime) -> list[FundingSettlement]:
+        return []   # funding is paid straight into the account (settle_funding)
+
+    async def cancel_order(self, order_id: str, symbol: str | None = None) -> OrderResult:
         return OrderResult(order_id=order_id, order=None, error=None)
 
     async def cancel_all_orders(self, symbol: str | None = None) -> OrderResult:
@@ -376,6 +424,8 @@ class _SimBrokerBase(BaseBroker):
 
 
 class SimPerpBroker(_SimBrokerBase):
+    _RULE_KEYS = ("perp_step", "perp_min_qty", "perp_min_notional")
+
     async def place_order(self, order: Order) -> OrderResult:
         a, s, q = self.a, order.symbol, order.quantity
         ins = self.md.instruments[s]
@@ -410,8 +460,8 @@ class SimPerpBroker(_SimBrokerBase):
         a.fees[s] += fee
         a.orders.append({"ts": self.clock(), "exchange": PERP_EX, "symbol": s,
                          "side": str(order.side), "qty": str(q), "price": str(fill)})
-        # Like the live BybitBroker: no fill_price -> consolidator uses the stamped bar close.
-        return OrderResult(order_id=f"p{len(a.orders)}", order=order, error=None)
+        # Like the live BybitBroker: the consolidator reads the real fill via order_status.
+        return self._filled(f"p{len(a.orders)}", order, fill, {"USDT": fee})
 
     async def position(self, symbol: str) -> PerpPosition | None:
         q = self.a.perp_qty[symbol]
@@ -433,6 +483,8 @@ class SimPerpBroker(_SimBrokerBase):
 
 
 class SimSpotBroker(_SimBrokerBase):
+    _RULE_KEYS = ("spot_step", "spot_min_qty", "spot_min_amt")
+
     async def place_order(self, order: Order) -> OrderResult:
         a, s, q = self.a, order.symbol, order.quantity
         ins = self.md.instruments[s]
@@ -456,6 +508,7 @@ class SimSpotBroker(_SimBrokerBase):
             got = (q * (1 - self.c.spot_fee)).quantize(Decimal("1e-8"), rounding=ROUND_DOWN)
             a.coin[s] += got
             a.fees[s] += (q - got) * fill
+            fees = {s.removesuffix("USDT"): q - got}   # Bybit spot buys pay in the base coin
         else:
             if a.coin[s] < q:
                 return self._reject(SPOT_EX, order, "Insufficient balance (coin)")
@@ -465,9 +518,10 @@ class SimSpotBroker(_SimBrokerBase):
             fee = proceeds * self.c.spot_fee
             a.cash(s, proceeds - fee)
             a.fees[s] += fee
+            fees = {"USDT": fee}
         a.orders.append({"ts": self.clock(), "exchange": SPOT_EX, "symbol": s,
                          "side": str(order.side), "qty": str(q), "price": str(fill)})
-        return OrderResult(order_id=f"s{len(a.orders)}", order=order, error=None)
+        return self._filled(f"s{len(a.orders)}", order, fill, fees)
 
     async def position(self, symbol: str) -> Position | None:
         q = self.a.coin[symbol]
@@ -484,13 +538,12 @@ class SimSpotBroker(_SimBrokerBase):
 _CLOCK = [datetime(2020, 1, 1, tzinfo=UTC)]
 
 
-class _SimDatetime(datetime):
-    @classmethod
-    def now(cls, tz=None):  # noqa: ANN001
+class _SimClock:
+    """Handed to the strategy as ``strategy.clock``: it reads the time only
+    through ``self.now()`` (interfaces/strategy.py)."""
+
+    def now(self) -> datetime:
         return _CLOCK[0]
-
-
-strat_mod.datetime = _SimDatetime  # the strategy only uses datetime.now(UTC)
 
 
 class _CountingHandler(logging.Handler):
@@ -516,7 +569,9 @@ class Config:
     wallet: Decimal = Decimal("60000")
     strategy_max_loss: Decimal | None = Decimal("500")    # in-process guard (MAX_DRAWDOWN)
     registry_max_loss: Decimal | None = Decimal("1000")   # consolidator guard (DEFAULT_MAX_LOSS)
-    min_order_size: Decimal = Decimal("1")                # as in consolidator_worker.main
+    # Live no longer sets one (consolidator_worker.main): the real per-symbol
+    # rules (InstrumentCache) round and check every order instead.
+    min_order_size: Decimal = Decimal("0")
     ticks_per_window: int = 8                             # 8 = one funding tick per hour
     naked_usd: Decimal = Decimal("100")                   # net-delta notional counted as unhedged
     start_ms: int = 0                                     # trading starts here (earlier = warm-up)
@@ -531,6 +586,7 @@ async def run_backtest(md: MarketData, params: dict, cfg: Config, quiet: bool = 
     spot = SimSpotBroker(acct, md, cfg.costs, clock_ms)
 
     strategy = FundingArbBybitStrategy(symbols=tuple(syms), **params)
+    strategy.clock = _SimClock()
     target_q: asyncio.Queue = asyncio.Queue()
     fills_q: asyncio.Queue = asyncio.Queue()
     guard = StrategyGuard(max_loss=cfg.strategy_max_loss if cfg.strategy_max_loss is not None
@@ -541,10 +597,12 @@ async def run_backtest(md: MarketData, params: dict, cfg: Config, quiet: bool = 
     if cfg.registry_max_loss is not None:
         registry = StrategyGuardRegistry(default_max_loss=cfg.registry_max_loss)
         registry.configure(STRATEGY_ID, cfg.registry_max_loss)
-    cons = OrderConsolidator(target_queue=target_q, brokers={PERP_EX: perp, SPOT_EX: spot},
+    brokers = {PERP_EX: perp, SPOT_EX: spot}
+    await cw.INSTRUMENTS.load(brokers)   # as the live consolidator does at start-up
+    cons = OrderConsolidator(target_queue=target_q, brokers=brokers,
                              default_exchange=PERP_EX, min_order_size=cfg.min_order_size,
                              fills_queue=fills_q, order_factory=cw._order_factory,
-                             guard_registry=registry)
+                             guard_registry=registry, order_check=cw.INSTRUMENTS.check)
 
     warn = _CountingHandler()
     slog = logging.getLogger(strat_mod.__name__)
@@ -1114,9 +1172,9 @@ def main() -> None:
     L.append("- *As deployed* runs the guards exactly as production does. If a guard trips, the "
              "simulation keeps running with whatever positions were left open, the way production "
              "would until someone intervenes.\n"
-             "- *Phantom fills* happen when the consolidator's `min_order_size=1` swallows an order "
-             "smaller than one coin but still publishes a FillConfirmation, so the strategy thinks "
-             "the leg traded.\n"
+             "- *Phantom fills*: the consolidator confirmed a fill without sending an order (the old "
+             "`min_order_size=1` did this). Orders the size rules refuse are now reported as "
+             "DROPPED with quantity 0, so this should stay 0.\n"
              "- *Unhedged exposure* is any hour where perp quantity and spot balance don't offset "
              "(net notional > $100), e.g. after a rejected spot order.\n"
              "- Funding events use the rate that actually settled at each boundary. Historical "
