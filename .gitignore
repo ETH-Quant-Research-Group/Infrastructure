@@ -215,3 +215,9 @@ tests/notebooks
 
 node_modules/
 .env
+
+.backtest_cache/
+backtest_report/
+
+.backtest_cache/
+backtest_report/

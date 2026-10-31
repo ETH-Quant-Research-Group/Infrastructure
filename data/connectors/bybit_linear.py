@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -124,40 +125,51 @@ class BybitLinearConnector:
         start_ms: int,
         end_ms: int | None = None,
     ) -> AsyncGenerator[RawFundingRate, None]:
-        """Yield historical funding rate settlements, oldest first."""
-        all_rates: list[RawFundingRate] = []
-        cursor_ms = start_ms
+        """Yield historical funding rate settlements in [start_ms, end_ms], oldest first.
+
+        Bybit returns at most 200 rows per call, newest first, and rejects a
+        request that passes only ``startTime``.  So we always send both bounds
+        and page BACKWARD: after each page, move ``endTime`` to just below the
+        oldest row received, until we reach ``start_ms`` or get a short page.
+        """
+        cursor_end = end_ms if end_ms is not None else int(time.time() * 1000)
+        rates: dict[int, RawFundingRate] = {}
         while True:
-            params: dict[str, str] = {
-                "category": "linear",
-                "symbol": symbol,
-                "startTime": str(cursor_ms),
-                "limit": "200",
-            }
-            if end_ms is not None:
-                params["endTime"] = str(end_ms)
             resp = await self._client.get(
-                "/v5/market/funding/history", params=params,
+                "/v5/market/funding/history",
+                params={
+                    "category": "linear",
+                    "symbol": symbol,
+                    "startTime": str(start_ms),
+                    "endTime": str(cursor_end),
+                    "limit": "200",
+                },
             )
             resp.raise_for_status()
-            rows = resp.json().get("result", {}).get("list", [])
+            body = resp.json()
+            if body.get("retCode", 0) != 0:
+                raise RuntimeError(
+                    f"Bybit funding/history {symbol}: {body.get('retCode')} {body.get('retMsg')}"
+                )
+            rows = body.get("result", {}).get("list", [])
             if not rows:
                 break
             for row in rows:
-                all_rates.append(RawFundingRate(
-                    symbol=row["symbol"],
-                    funding_time_ms=int(row["fundingRateTimestamp"]),
-                    funding_rate=row["fundingRate"],
-                    mark_price="0",  # not in historical endpoint
-                ))
-            oldest_ms = int(rows[-1]["fundingRateTimestamp"])
-            if oldest_ms <= cursor_ms or len(rows) < 200:
+                ts = int(row["fundingRateTimestamp"])
+                if start_ms <= ts <= cursor_end:
+                    rates[ts] = RawFundingRate(
+                        symbol=row["symbol"],
+                        funding_time_ms=ts,
+                        funding_rate=row["fundingRate"],
+                        mark_price="0",  # not in historical endpoint
+                    )
+            oldest_ms = min(int(r["fundingRateTimestamp"]) for r in rows)
+            if len(rows) < 200 or oldest_ms <= start_ms:
                 break
-            cursor_ms = oldest_ms + 1
+            cursor_end = oldest_ms - 1
 
-        all_rates.sort(key=lambda r: r["funding_time_ms"])
-        for r in all_rates:
-            yield r
+        for ts in sorted(rates):
+            yield rates[ts]
 
     # ------------------------------------------------------------ WebSocket
 
