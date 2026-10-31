@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTheme, th } from '../theme'
+import { BacktestResultCard, BacktestSection } from './Backtest'
+import HistoryDatabase from './History'
 
 const MODES = ['backtest', 'paper', 'live']
 const MODE_BADGE = {
@@ -93,6 +95,11 @@ function DeployedCard({ d, isAlive, busy, onStop, onRedeploy, onViewLogs, c }) {
       {d.env?.MAX_DRAWDOWN && (
         <p className={`${c.t4} text-xs font-mono`}>max drawdown: {d.env.MAX_DRAWDOWN}</p>
       )}
+      {d.env?.CLOSE_ON_TRIP && (
+        <p className={`${c.t4} text-xs font-mono`}>
+          close positions on trip: {d.env.CLOSE_ON_TRIP === 'true' ? 'yes' : 'no'}
+        </p>
+      )}
       <p className={`${c.t5} text-xs font-mono`}>
         {d.created_at ? new Date(d.created_at).toLocaleString() : '—'}
       </p>
@@ -129,6 +136,8 @@ function DeployPanel({ initial, onClose, onDeployed, c }) {
   const [image, setImage] = useState(initial?.image ?? '')
   const [mode, setMode] = useState(initial?.mode ?? 'paper')
   const [maxDrawdown, setMaxDrawdown] = useState(initial?.env?.MAX_DRAWDOWN ?? '')
+  // '' = the consolidator's GUARD_CLOSE_ON_TRIP default
+  const [closeOnTrip, setCloseOnTrip] = useState(initial?.env?.CLOSE_ON_TRIP ?? '')
   const [error, setError] = useState(null)
   const [streaming, setStreaming] = useState(false)
   const [running, setRunning] = useState(false)
@@ -151,15 +160,23 @@ function DeployPanel({ initial, onClose, onDeployed, c }) {
     setName(sanitizeName(pkgName))
   }
 
+  function buildEnv() {
+    const env = {}
+    if (maxDrawdown.trim()) env.MAX_DRAWDOWN = maxDrawdown.trim()
+    if (closeOnTrip) env.CLOSE_ON_TRIP = closeOnTrip
+    return env
+  }
+
   async function handleDeploy(e) {
     e.preventDefault()
+    // Backtests never deploy a container: BacktestSection runs them.
+    if (mode === 'backtest') return
     setError(null)
     setProgressLines([])
     setRunning(false)
     setStreaming(true)
 
-    const env = {}
-    if (maxDrawdown.trim()) env.MAX_DRAWDOWN = maxDrawdown.trim()
+    const env = buildEnv()
 
     try {
       const res = await fetch('/api/deploy/deploy', {
@@ -196,10 +213,10 @@ function DeployPanel({ initial, onClose, onDeployed, c }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 md:p-10">
-      <div className={`${c.card} border ${c.b1} rounded-xl w-full max-w-lg flex flex-col gap-5 p-6`}>
+      <div className={`${c.card} border ${c.b1} rounded-xl w-full ${mode === 'backtest' ? 'max-w-3xl' : 'max-w-lg'} flex flex-col gap-5 p-6`}>
         <div className="flex items-center justify-between">
           <h3 className={`font-serif ${c.t1} font-medium text-xl`}>
-            {initial ? 'Redeploy' : 'New deployment'}
+            {mode === 'backtest' ? 'Backtest' : initial ? 'Redeploy' : 'New deployment'}
           </h3>
           <button onClick={onClose} className={`${c.t4} text-xl leading-none cursor-pointer bg-transparent border-0`}>
             ×
@@ -286,13 +303,33 @@ function DeployPanel({ initial, onClose, onDeployed, c }) {
               />
             </div>
 
-            <button
-              type="submit"
-              disabled={!image}
-              className={`self-start px-4 py-2 rounded-lg text-sm font-medium ${c.tabA} disabled:opacity-40 cursor-pointer`}
-            >
-              Deploy
-            </button>
+            {/* CLOSE_ON_TRIP, read by the consolidator's guard
+                (workers/consolidator_worker.py _sync_guard_config): close
+                this strategy's own positions when its max drawdown trips. */}
+            <div className="flex flex-col gap-1.5">
+              <label className={`text-xs font-medium uppercase tracking-wider ${c.t3}`}>Close positions on trip</label>
+              <select
+                value={closeOnTrip}
+                onChange={e => setCloseOnTrip(e.target.value)}
+                className={`px-3 py-2 rounded-lg border ${c.b2} ${c.innerCard} ${c.t1} text-sm font-mono outline-none`}
+              >
+                <option value="">default (consolidator setting)</option>
+                <option value="true">yes - close this strategy's positions</option>
+                <option value="false">no - only stop new orders</option>
+              </select>
+            </div>
+
+            {mode === 'backtest' ? (
+              <BacktestSection key={image} name={name} image={image} env={buildEnv()} c={c} />
+            ) : (
+              <button
+                type="submit"
+                disabled={!image}
+                className={`self-start px-4 py-2 rounded-lg text-sm font-medium ${c.tabA} disabled:opacity-40 cursor-pointer`}
+              >
+                Deploy
+              </button>
+            )}
           </form>
         ) : (
           <div className="flex flex-col gap-3">
@@ -329,6 +366,7 @@ export default function Deploy({ onViewLogs }) {
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [panel, setPanel] = useState(null) // null | 'new' | { ...deployment to redeploy }
+  const [backtests, setBacktests] = useState([])
   const isAlive = useHeartbeats()
 
   async function refresh() {
@@ -340,6 +378,14 @@ export default function Deploy({ onViewLogs }) {
       setError(e.message)
     }
   }
+
+  function refreshBacktests() {
+    apiFetch('/api/backtest/results')
+      .then(data => setBacktests(data.backtests ?? []))
+      .catch(() => { /* shown as an empty list; the deploy list reports manager errors */ })
+  }
+
+  useEffect(refreshBacktests, [])
 
   useEffect(() => {
     refresh()
@@ -403,10 +449,32 @@ export default function Deploy({ onViewLogs }) {
         </div>
       )}
 
+      <div className="flex flex-col gap-3">
+        <h3 className={`font-serif ${c.t1} font-medium text-lg`}>Backtest results</h3>
+        {backtests.length === 0 ? (
+          <p className={`${c.t4} text-sm`}>No backtests yet: + Deploy, then pick the "backtest" mode.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {backtests.map(b => (
+              <BacktestResultCard
+                key={b.id}
+                run={b.run}
+                result={b.result}
+                title={b.name}
+                subtitle={`${b.image} · ${new Date(b.created_at).toLocaleString()}`}
+                c={c}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <HistoryDatabase c={c} />
+
       {panel && (
         <DeployPanel
           initial={panel === 'new' ? null : panel}
-          onClose={() => { setPanel(null); refresh() }}
+          onClose={() => { setPanel(null); refresh(); refreshBacktests() }}
           onDeployed={refresh}
           c={c}
         />

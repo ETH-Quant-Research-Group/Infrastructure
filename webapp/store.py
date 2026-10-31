@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
@@ -237,6 +238,11 @@ def record_fill(data: dict) -> None:
     sid = str(data.get("strategy_id", ""))
     if not sid:
         return
+    try:
+        if Decimal(str(data.get("quantity") or "0")) == 0:
+            return  # nothing executed (rejected / dropped / unknown)
+    except InvalidOperation:
+        pass
     record: FillRecord = {
         "strategy_id": sid,
         "symbol": str(data.get("symbol", "")),

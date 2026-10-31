@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, ClassVar
 
@@ -152,6 +152,13 @@ class FundingArbBybitStrategy(BaseStrategy):
         self._last_period_time: dict[str, datetime | None] = {s: None for s in self._symbols}
         self._cum_funding: dict[str, float] = {s: 0.0 for s in self._symbols}
 
+        # Funding interval per symbol, in hours.  Bybit sets it per symbol and can
+        # change it (e.g. 8h -> 4h or 1h).  Learned from the step between successive
+        # next_funding_time values; 8h until the first step is seen.
+        self._funding_interval_h: dict[str, float] = {s: 8.0 for s in self._symbols}
+        self._last_next_funding: dict[str, datetime | None] = {s: None for s in self._symbols}
+        self._interval_up_candidate: dict[str, tuple[float, int]] = {}
+
         # Settlement-window gate: canonical UTC datetime of the most recent
         # settlement window this symbol has already processed.  Prevents both
         # acting on between-settlement predicted-rate noise (I1) and
@@ -215,7 +222,7 @@ class FundingArbBybitStrategy(BaseStrategy):
                 self._fill_state[sym] = "hedged"
                 self._perp_qty[sym] = float(perp_qty)
                 self._spot_qty[sym] = float(spot_qty)
-                self._last_period_time[sym] = datetime.now(UTC)
+                self._last_period_time[sym] = self.now()
                 log.info(
                     "[FundingArbBybit:%s] restored state=hedged  perp=%s  spot=%s",
                     sym, perp_qty, spot_qty,
@@ -227,7 +234,7 @@ class FundingArbBybitStrategy(BaseStrategy):
                 self._fill_state[sym] = "hedged"
                 self._perp_qty[sym] = float(perp_qty)
                 self._spot_qty[sym] = 0.0
-                self._last_period_time[sym] = datetime.now(UTC)
+                self._last_period_time[sym] = self.now()
                 log.warning(
                     "[FundingArbBybit:%s] restored state=hedged (NO SPOT) perp=%s"
                     " — will auto-rehedge on next funding tick",
@@ -285,6 +292,7 @@ class FundingArbBybitStrategy(BaseStrategy):
                     "entry_price": self._entry_price[sym],
                     "holding_periods": self._holding_periods[sym],
                     "cum_funding": self._cum_funding[sym],
+                    "funding_interval_h": self._funding_interval_h[sym],
                     "last_settled_window": (
                         self._last_settled_window[sym].isoformat()
                         if self._last_settled_window[sym] else None
@@ -313,9 +321,12 @@ class FundingArbBybitStrategy(BaseStrategy):
         if current_rate != current_rate:   # NaN check
             return None
 
-        periods_per_yr = (24.0 / self._params["period_hours"]) * 365.0
+        self._update_funding_interval(sym, rate.next_funding_time)
+        # Annualise with the symbol's real funding interval (a 4h symbol pays
+        # its quoted rate twice per 8h window).
+        periods_per_yr = (24.0 / self._funding_interval_h[sym]) * 365.0
         ann_rate = current_rate * periods_per_yr
-        now = datetime.now(UTC)
+        now = self.now()
 
         # ----- Watchdog: detect stuck pending signals -----
         # A pending state ("entering"/"exiting") with no fill confirmation
@@ -428,6 +439,41 @@ class FundingArbBybitStrategy(BaseStrategy):
         # Decision picks back up at the next true settlement window.
         return None
 
+    _VALID_INTERVALS_H: ClassVar[tuple[float, ...]] = (1.0, 2.0, 4.0, 8.0)
+
+    def _update_funding_interval(self, sym: str, next_funding_time: datetime | None) -> None:
+        """Learn the funding interval from steps in ``next_funding_time``.
+
+        Each settlement moves Bybit's nextFundingTime forward by exactly one
+        interval, so the step size is the interval.  Missed ticks (e.g. a
+        websocket reconnect across a settlement) can only make a step look
+        LONGER, so a shorter interval is adopted at once, while a longer one
+        must be seen on two consecutive steps.
+        """
+        if next_funding_time is None:
+            return
+        prev = self._last_next_funding[sym]
+        self._last_next_funding[sym] = next_funding_time
+        if prev is None or next_funding_time <= prev:
+            return
+        step_h = (next_funding_time - prev).total_seconds() / 3600.0
+        valid = next((v for v in self._VALID_INTERVALS_H if abs(step_h - v) < 1e-6), None)
+        if valid is None:
+            return
+        current = self._funding_interval_h[sym]
+        if valid == current:
+            self._interval_up_candidate.pop(sym, None)
+            return
+        if valid > current:
+            seen_val, seen_n = self._interval_up_candidate.get(sym, (valid, 0))
+            seen_n = seen_n + 1 if seen_val == valid else 1
+            self._interval_up_candidate[sym] = (valid, seen_n)
+            if seen_n < 2:
+                return
+        self._interval_up_candidate.pop(sym, None)
+        log.warning("[FundingArbBybit:%s] funding interval %gh -> %gh", sym, current, valid)
+        self._funding_interval_h[sym] = valid
+
     @staticmethod
     def _settlement_window(now: datetime) -> datetime:
         """Canonical UTC datetime of the most recent 00/08/16 settlement boundary."""
@@ -465,7 +511,7 @@ class FundingArbBybitStrategy(BaseStrategy):
             # the strategy's view of its hedge until the spot-fill on_fill
             # arrives (at which point we'll trust the actual fill quantity).
             self._spot_qty[sym] = perp_filled
-            self._pending_signal_at[sym] = datetime.now(UTC)
+            self._pending_signal_at[sym] = self.now()
             log.info(
                 "[FundingArbBybit:%s] PERP FILL confirmed qty=%s → buying spot %.6f",
                 sym, fill.quantity, spot_qty,
@@ -502,7 +548,7 @@ class FundingArbBybitStrategy(BaseStrategy):
             if spot_qty > 0:
                 self._fill_state[sym] = "flat"
                 self._spot_qty[sym] = 0.0
-                self._pending_signal_at[sym] = datetime.now(UTC)
+                self._pending_signal_at[sym] = self.now()
                 log.info(
                     "[FundingArbBybit:%s] PERP CLOSE confirmed — selling spot %.8f",
                     sym, spot_qty,
@@ -626,14 +672,17 @@ class FundingArbBybitStrategy(BaseStrategy):
             periods_elapsed = 1
 
         self._holding_periods[sym] += periods_elapsed
-        self._cum_funding[sym] += current_rate
+        self._cum_funding[sym] += current_rate * 8.0 / self._funding_interval_h[sym]
         self._last_period_time[sym] = window
 
         # Compound funding into shadow equity.  Shadow equity drives the next
         # entry's position size; tracking it here keeps sizing fee-aware.
+        # A shorter funding interval means several settlements per 8h window;
+        # approximate them all with the current rate.
+        settlements = 8.0 / self._funding_interval_h[sym]
         mark = float(rate.mark_price)
         if mark > 0:
-            payment = abs(self._perp_qty[sym]) * mark * current_rate
+            payment = abs(self._perp_qty[sym]) * mark * current_rate * settlements
             self._equity += payment
 
         log.info(
@@ -689,7 +738,7 @@ class FundingArbBybitStrategy(BaseStrategy):
         self._holding_periods[sym] = 0
         self._last_period_time[sym] = None
         self._fill_state[sym] = "exiting"
-        self._pending_signal_at[sym] = datetime.now(UTC)
+        self._pending_signal_at[sym] = self.now()
 
         return TargetPosition(
             symbol=sym,

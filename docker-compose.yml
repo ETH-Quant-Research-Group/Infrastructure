@@ -53,7 +53,8 @@ services:
       - nats
 
   # ---------------------------------------------------------------------
-  # Consolidator + brokers — nets strategy signals and places live orders.
+  # Consolidator + brokers — turns strategy signals into tagged orders and
+  # reports the real fills back.
   # ---------------------------------------------------------------------
   consolidator:
     image: infra-worker:latest
@@ -68,10 +69,43 @@ services:
       # engine/order/guard_registry.py) — including compose-managed
       # strategy-* services, which don't go through that form at all.
       DEFAULT_MAX_LOSS: ${DEFAULT_MAX_LOSS:-1000}
+      # What the guard counts: false = realized + funding − fees; true = also
+      # unrealized at live prices. Re-checked after each fill and every
+      # GUARD_CHECK_INTERVAL seconds. See engine/order/guard_registry.py.
+      GUARD_INCLUDE_UNREALIZED: ${GUARD_INCLUDE_UNREALIZED:-false}
+      GUARD_CHECK_INTERVAL: ${GUARD_CHECK_INTERVAL:-30}
+      # Every Nth periodic check also counts unrealized at fresh prices
+      # (0 = never). Ignored when GUARD_INCLUDE_UNREALIZED is true.
+      GUARD_UNREALIZED_EVERY: ${GUARD_UNREALIZED_EVERY:-0}
+      # On a trip, also close the tripped strategy's OWN positions (never
+      # other strategies'). Per strategy: CLOSE_ON_TRIP on the Deploy page.
+      GUARD_CLOSE_ON_TRIP: ${GUARD_CLOSE_ON_TRIP:-false}
     volumes:
       - webapp_data:/root/.qrf
     depends_on:
       - nats
+
+  # ---------------------------------------------------------------------
+  # Strategy info — live info (holdings, PnL, last trades) about the
+  # strategies in STRATEGY_INFO_NAMES / STRATEGY_INFO_IDS, written every few
+  # seconds to /root/.qrf/strategy_info.json. Reads the ledger without
+  # writing; more strategies can be added over NATS
+  # (control.strategy_info.add). See workers/strategy_info.py.
+  # ---------------------------------------------------------------------
+  strategy-info:
+    image: infra-worker:latest
+    command: ["python", "-m", "workers.strategy_info"]
+    restart: unless-stopped
+    networks: [app]
+    environment:
+      <<: *worker-env
+      STRATEGY_INFO_NAMES: ${STRATEGY_INFO_NAMES:-}
+      STRATEGY_INFO_IDS: ${STRATEGY_INFO_IDS:-}
+    volumes:
+      - webapp_data:/root/.qrf
+    depends_on:
+      - nats
+      - consolidator
 
   # ---------------------------------------------------------------------
   # Webapp — REST API, WebSocket feed, and the built frontend.
@@ -90,8 +124,17 @@ services:
       <<: *worker-env
       GITHUB_ORG: ${GITHUB_ORG:-ETH-Quant-Research-Group}
       GITHUB_PACKAGES_TOKEN: ${GITHUB_PACKAGES_TOKEN:-}
+      # Backtest starter set (engine/backtest/seed.py): gathered into the
+      # history database at start-up, then topped up daily.
+      HISTORY_SEED: ${HISTORY_SEED:-on}
+      HISTORY_SEED_TOP: ${HISTORY_SEED_TOP:-50}
+      HISTORY_SEED_INTERVAL: ${HISTORY_SEED_INTERVAL:-1h}
+      HISTORY_SEED_YEARS: ${HISTORY_SEED_YEARS:-3}
     volumes:
       - webapp_data:/root/.qrf
+      # Backtest history (bars / funding by month), downloaded from the
+      # Deploy page; the manager mounts it read-only into backtest runs.
+      - backtest_cache:/root/.qrf/backtest_cache
     depends_on:
       - nats
 
@@ -220,6 +263,13 @@ services:
       ALLOWED_IMAGE_PREFIX: ${ALLOWED_IMAGE_PREFIX:-ghcr.io/eth-quant-research-group/}
       GITHUB_USERNAME: ${GITHUB_USERNAME:-}
       GITHUB_PACKAGES_TOKEN: ${GITHUB_PACKAGES_TOKEN:-}
+      # Backtests get the consolidator's guard defaults, so they're guarded
+      # exactly like a live deploy (keep in sync with the consolidator).
+      BACKTEST_CACHE_VOLUME: infra-backtest-cache
+      DEFAULT_MAX_LOSS: ${DEFAULT_MAX_LOSS:-1000}
+      GUARD_INCLUDE_UNREALIZED: ${GUARD_INCLUDE_UNREALIZED:-false}
+      GUARD_UNREALIZED_EVERY: ${GUARD_UNREALIZED_EVERY:-0}
+      GUARD_CLOSE_ON_TRIP: ${GUARD_CLOSE_ON_TRIP:-false}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/workspace:ro
@@ -231,3 +281,7 @@ services:
 volumes:
   webapp_data:
   manager_state:
+  # Fixed name (not project-prefixed) so the manager can mount it into
+  # `docker run` backtest containers by name.
+  backtest_cache:
+    name: infra-backtest-cache

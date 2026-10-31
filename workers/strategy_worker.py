@@ -30,15 +30,42 @@ import strategies as _strategies_pkg
 from config import NATS_URL
 from engine.data import codec
 from engine.data.nats_bus import NatsBus
+from engine.order.instruments import OrderSizing
 from engine.strategy.guard import StrategyGuard
 from engine.strategy.pnl_calc import PnLCalc
 from engine.strategy.runner import StrategyRunner
 from interfaces.strategy import BaseStrategy
 
+from data.types import DollarBar, TickBar, TimeBar, VolumeBar
+
 if TYPE_CHECKING:
+    from data.types import AnyBar
     from interfaces.signals import TargetPosition
 
 log = logging.getLogger(__name__)
+
+# The old in-container guard, fed with the whole account's PnL.  Disconnected
+# by default (the consolidator's per-strategy guard is the real one); set
+# LEGACY_STRATEGY_GUARD=1 to feed it again.  Its code is kept as it was.
+_LEGACY_STRATEGY_GUARD = os.environ.get("LEGACY_STRATEGY_GUARD", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# The old dashboard feed: the whole account's PnL republished as this
+# strategy's (pnl.<strategy_id>), so every strategy showed the same chart.
+# Disconnected by default — workers/strategy_info.py publishes each watched
+# strategy's own PnL there now.  LEGACY_ACCOUNT_PNL=1 turns it back on.
+_LEGACY_ACCOUNT_PNL = os.environ.get("LEGACY_ACCOUNT_PNL", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# The old PnLCalc seeding: every position on the whole account, read with the
+# Bybit API key.  Disconnected by default — the PnLCalc is seeded with this
+# strategy's own holdings from the ledger (_seed_from_ledger).
+# LEGACY_ACCOUNT_SEED=1 turns the old seeding back on.
+_LEGACY_ACCOUNT_SEED = os.environ.get("LEGACY_ACCOUNT_SEED", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 
 def _load_strategy(name: str) -> type[BaseStrategy]:
@@ -92,6 +119,15 @@ async def _listen_fills(
     async def _cb(msg: _nats_msg.Msg) -> None:
         try:
             fill = codec.decode_fill(msg.data)
+            if fill.quantity == 0:
+                # Nothing executed (rejected / dropped / unknown).  Don't feed
+                # it to the strategy as a fill — its pending-signal watchdog
+                # reconciles from broker state instead.
+                log.warning(
+                    "%s order for %s %s not filled (%s): %s",
+                    strategy_id, fill.exchange, fill.symbol, fill.status, fill.reason,
+                )
+                return
             # Track every leg by (symbol, exchange) so spot and perp unrealized
             # offset correctly for delta-neutral strategies.
             runner.pnl_calc.on_fill(fill.symbol, fill.quantity, fill.fill_price, exchange=fill.exchange)
@@ -154,12 +190,139 @@ async def _publish_registration_periodically(
         await nc.publish(f"strategy.register.{strategy_cls.__name__}", payload)
 
 
+HISTORY_SUBJECT = "control.history"
+HISTORY_BARS = 60
+
+
+async def _fetch_history(
+    nc: nats.aio.client.Client,
+    topics: list[str],
+    count: int = HISTORY_BARS,
+    timeout: float = 20.0,
+) -> list[AnyBar]:
+    """The last *count* finished bars of every bar topic in *topics*, asked
+    from the data feed at start-up, all in time order — for the strategy's
+    ``on_history_bar``.  A topic whose history can't be fetched is skipped
+    (logged): the strategy then starts without it."""
+    bars: list[AnyBar] = []
+    for topic in topics:
+        if ".bars." not in topic:
+            continue
+        try:
+            msg = await nc.request(
+                HISTORY_SUBJECT, json.dumps({"topic": topic, "count": count}).encode(),
+                timeout=timeout,
+            )
+            reply = json.loads(msg.data)
+            if "error" in reply:
+                raise RuntimeError(reply["error"])
+            got = [codec.decode(json.dumps(b).encode()) for b in reply["bars"]]
+        except Exception as exc:
+            log.warning("no start-up history for %s: %s", topic, exc)
+            continue
+        bars += [b for b in got if isinstance(b, (TimeBar, TickBar, VolumeBar, DollarBar))]
+        log.info("start-up history: %d bars for %s", len(got), topic)
+    return sorted(bars, key=lambda b: b.close_time)
+
+
+INSTRUMENTS_SUBJECT = "control.instruments.rules"
+ORDER_SIZING_REFRESH = 3600.0  # seconds
+
+
+def _topic_symbols(topics: list[str]) -> list[str]:
+    """The symbols in bus topics like ``futures.ETHUSDT.funding_rate``."""
+    return sorted({parts[1] for t in topics if len(parts := t.split(".")) >= 2})
+
+
+async def _fetch_order_sizing(
+    nc: nats.aio.client.Client,
+    symbols: list[str],
+    sizing: OrderSizing,
+    timeout: float = 5.0,
+) -> bool:
+    """Fill *sizing* in place with the order-size rules for *symbols* (every
+    exchange), asked from the consolidator — which keeps them in memory, so
+    this never reaches Bybit.  Returns whether it worked; on failure the
+    previous rules stay (logged)."""
+    try:
+        msg = await nc.request(
+            INSTRUMENTS_SUBJECT, json.dumps({"symbols": symbols}).encode(), timeout=timeout
+        )
+        reply = json.loads(msg.data)
+        sizing.update(reply["rules"])
+    except Exception as exc:
+        log.warning("could not get order-size rules from the consolidator: %s", exc)
+        return False
+    log.info("order-size rules: %d (exchange, symbol) pairs for %s", len(sizing), symbols)
+    return True
+
+
+async def _refresh_order_sizing_periodically(
+    nc: nats.aio.client.Client,
+    symbols: list[str],
+    sizing: OrderSizing,
+    interval: float = ORDER_SIZING_REFRESH,
+) -> None:
+    while True:
+        # Retry every minute while nothing has been loaded yet.
+        await asyncio.sleep(interval if len(sizing) else 60)
+        await _fetch_order_sizing(nc, symbols, sizing)
+
+
+LEDGER_HOLDINGS_SUBJECT = "control.ledger.holdings"
+
+
+async def _seed_from_ledger(
+    nc: nats.aio.client.Client,
+    strategy_id: str,
+    pnl_calc: PnLCalc,
+    timeout: float = 5.0,
+) -> int:
+    """Seed *pnl_calc* with this strategy's **own** open holdings, asked from
+    the consolidator (which owns the ledger) over NATS — not with the whole
+    account's positions.  Returns how many holdings were seeded.
+
+    If the consolidator doesn't answer, the PnLCalc starts empty (logged):
+    better no seed than another strategy's positions.  Realized PnL from
+    before the restart isn't carried over, as before.
+    """
+    try:
+        msg = await nc.request(
+            LEDGER_HOLDINGS_SUBJECT,
+            json.dumps({"strategy": strategy_id}).encode(),
+            timeout=timeout,
+        )
+        holdings = json.loads(msg.data)["holdings"]
+    except Exception as exc:
+        log.warning("could not get %s's holdings from the consolidator (%s) — PnLCalc starts empty",
+                    strategy_id, exc)
+        return 0
+    seeded = 0
+    for h in holdings:
+        qty = Decimal(h["quantity"])
+        if qty != 0:
+            pnl_calc.on_fill(h["symbol"], qty, Decimal(h["avg_entry_price"]), exchange=h["exchange"])
+            seeded += 1
+    log.info("seeded PnLCalc with %d of %s's own holdings from the ledger", seeded, strategy_id)
+    return seeded
+
+
 async def _bridge_broker_pnl_to_strategy(
     nc: nats.aio.client.Client,
     strategy_id: str,
     guard: StrategyGuard,
+    feed_guard: bool = True,
+    publish_pnl: bool = True,
 ) -> None:
     """Re-publish broker aggregate PnL as strategy PnL.
+
+    With *feed_guard* (the legacy in-container guard, LEGACY_STRATEGY_GUARD)
+    the account-wide PnL changes are also fed to this container's guard.
+    With *publish_pnl* (LEGACY_ACCOUNT_PNL) the account-wide PnL is
+    republished as ``pnl.<strategy_id>``.  Both off by default: the
+    consolidator's guard is the real one, and ``workers/strategy_info.py``
+    now publishes each strategy's own PnL on ``pnl.<strategy>`` — this
+    account-wide copy would give every strategy the same chart.
 
     For a delta-neutral funding arb strategy the broker's equity change IS the
     strategy's P&L (funding income - fees).  The fill-based PnLCalc always nets
@@ -203,18 +366,20 @@ async def _bridge_broker_pnl_to_strategy(
                     )
                     last_total = current_total
                 else:
-                    guard.record_pnl(delta)
+                    if feed_guard:
+                        guard.record_pnl(delta)
                     last_total = current_total
-            await nc.publish(
-                f"pnl.{strategy_id}",
-                json.dumps({
-                    "strategy_id": strategy_id,
-                    "total_realized": data.get("total_realized", "0"),
-                    "total_unrealized": data.get("total_unrealized", "0"),
-                    "total": data.get("total", "0"),
-                    "timestamp": data.get("timestamp", ""),
-                }).encode(),
-            )
+            if publish_pnl:
+                await nc.publish(
+                    f"pnl.{strategy_id}",
+                    json.dumps({
+                        "strategy_id": strategy_id,
+                        "total_realized": data.get("total_realized", "0"),
+                        "total_unrealized": data.get("total_unrealized", "0"),
+                        "total": data.get("total", "0"),
+                        "timestamp": data.get("timestamp", ""),
+                    }).encode(),
+                )
         except Exception:
             pass
 
@@ -247,39 +412,44 @@ async def main() -> None:
     guard = StrategyGuard(max_loss=_resolve_max_loss(strategy_cls))
     pnl_calc = PnLCalc()
 
-    # Seed PnLCalc with current open positions from Bybit so that unrealized PnL
-    # is correct immediately after a restart without waiting for new fills.
-    # Uses the same brokers as the consolidator by reading env vars directly.
-    try:
-        from decimal import Decimal as _D
-        from execution.brokers.bybit import BybitBroker as _BybitBroker
-        from execution.brokers.bybit_spot import BybitSpotBroker as _BybitSpot
-        _perp = _BybitBroker(demo=True)
-        _spot = _BybitSpot(demo=True)
-        _perp_positions = await _perp.list_positions()
-        _spot_positions = await _spot.list_positions()
-        # Build perp entry price map — used as reference for spot seeding so
-        # both legs start at the same price and unrealized nets to ~$0.
-        perp_entry_map: dict[str, _D] = {}
-        for p in _perp_positions:
-            if p.quantity != _D(0):
-                pnl_calc.on_fill(p.symbol, p.quantity, p.avg_entry_price, exchange="bybit_demo")
-                if p.avg_entry_price > _D(0):
-                    perp_entry_map[p.symbol] = p.avg_entry_price
-        for p in _spot_positions:
-            if p.quantity > _D(0):
-                # Use perp entry as reference so spot unrealized offsets perp unrealized.
-                # Falls back to current price (usdValue/qty) if no matching perp.
-                entry = perp_entry_map.get(p.symbol, p.avg_entry_price)
-                pnl_calc.on_fill(p.symbol, p.quantity, entry, exchange="bybit_spot")
-        await _perp.aclose()
-        await _spot.aclose()
-        log.info(
-            "Seeded PnLCalc: %d perp + %d spot positions",
-            len(_perp_positions), len(_spot_positions),
-        )
-    except Exception as _exc:
-        log.warning("Could not seed PnLCalc from open positions: %s", _exc)
+    # Legacy seeding (LEGACY_ACCOUNT_SEED=1): every open position on the whole
+    # Bybit account, whichever strategy opened it.  Off by default — the
+    # PnLCalc is seeded with this strategy's own holdings from the ledger
+    # instead, once NATS is connected (_seed_from_ledger, below).
+    if _LEGACY_ACCOUNT_SEED:
+        # Seed PnLCalc with current open positions from Bybit so that unrealized PnL
+        # is correct immediately after a restart without waiting for new fills.
+        # Uses the same brokers as the consolidator by reading env vars directly.
+        try:
+            from decimal import Decimal as _D
+            from execution.brokers.bybit import BybitBroker as _BybitBroker
+            from execution.brokers.bybit_spot import BybitSpotBroker as _BybitSpot
+            _perp = _BybitBroker(demo=True)
+            _spot = _BybitSpot(demo=True)
+            _perp_positions = await _perp.list_positions()
+            _spot_positions = await _spot.list_positions()
+            # Build perp entry price map — used as reference for spot seeding so
+            # both legs start at the same price and unrealized nets to ~$0.
+            perp_entry_map: dict[str, _D] = {}
+            for p in _perp_positions:
+                if p.quantity != _D(0):
+                    pnl_calc.on_fill(p.symbol, p.quantity, p.avg_entry_price, exchange="bybit_demo")
+                    if p.avg_entry_price > _D(0):
+                        perp_entry_map[p.symbol] = p.avg_entry_price
+            for p in _spot_positions:
+                if p.quantity > _D(0):
+                    # Use perp entry as reference so spot unrealized offsets perp unrealized.
+                    # Falls back to current price (usdValue/qty) if no matching perp.
+                    entry = perp_entry_map.get(p.symbol, p.avg_entry_price)
+                    pnl_calc.on_fill(p.symbol, p.quantity, entry, exchange="bybit_spot")
+            await _perp.aclose()
+            await _spot.aclose()
+            log.info(
+                "Seeded PnLCalc: %d perp + %d spot positions",
+                len(_perp_positions), len(_spot_positions),
+            )
+        except Exception as _exc:
+            log.warning("Could not seed PnLCalc from open positions: %s", _exc)
 
     strategy_instance = strategy_cls()
 
@@ -310,7 +480,22 @@ async def main() -> None:
 
     nc = await nats.connect(NATS_URL)
     try:
+        if not _LEGACY_ACCOUNT_SEED:
+            await _seed_from_ledger(nc, strategy_id, pnl_calc)
+        # Order-size rules for the strategy's symbols, read by the strategy
+        # as self.order_sizing — set before the runner calls on_start().
+        sizing_symbols = _topic_symbols(list(strategy_cls.topics))
+        order_sizing = OrderSizing()
+        await _fetch_order_sizing(nc, sizing_symbols, order_sizing)
+        strategy_instance.order_sizing = order_sizing
+        # Live bars are queued from here on, so none falls between the
+        # history snapshot and the first live one (the runner skips the
+        # ones the history already has).
+        runner.subscribe()
         await bus.start(nc)
+        # Past bars for on_history_bar (warm-up), fed by the runner after
+        # on_start and before any live bar — never to on_bar (B12).
+        history = await _fetch_history(nc, list(strategy_cls.topics))
 
         await nc.publish(
             f"strategy.register.{strategy_cls.__name__}",
@@ -332,10 +517,20 @@ async def main() -> None:
         )
 
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(runner.run())
+            tg.create_task(runner.run(history))
             tg.create_task(_forward_targets(nc, target_queue))
             tg.create_task(_listen_fills(nc, strategy_id, runner))
-            tg.create_task(_bridge_broker_pnl_to_strategy(nc, strategy_id, guard))
+            tg.create_task(
+                _refresh_order_sizing_periodically(nc, sizing_symbols, order_sizing)
+            )
+            if _LEGACY_STRATEGY_GUARD or _LEGACY_ACCOUNT_PNL:
+                tg.create_task(
+                    _bridge_broker_pnl_to_strategy(
+                        nc, strategy_id, guard,
+                        feed_guard=_LEGACY_STRATEGY_GUARD,
+                        publish_pnl=_LEGACY_ACCOUNT_PNL,
+                    )
+                )
             tg.create_task(
                 _publish_heartbeat_periodically(nc, strategy_id, strategy_instance)
             )
