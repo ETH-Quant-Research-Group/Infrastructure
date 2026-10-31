@@ -419,10 +419,36 @@ def test_still_open_after_timeout_and_cancel_reports_what_filled_so_far(
     s.signal("0.5")
 
     fill = s.fill()
-    assert fill.status is FillStatus.PARTIAL
+    # Not PARTIAL: that's final, and the order may still fill more.
+    assert fill.status is FillStatus.UNKNOWN
     assert fill.quantity == Decimal("0.1")
     assert "after timeout" in (fill.reason or "")
     assert broker.cancelled == [("bybit-1_1", "ETHUSDT")]
+    [held] = s.ledger.holdings("alpha")
+    assert held.quantity == Decimal("0.1")
+    assert [t.order_link_id for t in s.ledger.unfinished_trades()] == ["1_1"]
+
+
+def test_order_left_open_is_finished_later_without_counting_twice(
+    tmp_path: Path,
+) -> None:
+    broker = _Broker(lambda o: [_status(o, OrderState.PARTIALLY_FILLED, "0.1")])
+    s = _Setup(tmp_path, broker)
+    s.signal("0.5")  # 0.1 at 2500 so far, fee 0.1
+    order = broker._orders["1_1"]
+    broker._replies["1_1"] = [_status(
+        order, OrderState.CANCELLED, "0.3", price="2600", fees={"USDT": Decimal("0.3")},
+    )]
+
+    asyncio.run(s.consolidator.recover_unfinished())  # e.g. at the next start
+
+    [held] = s.ledger.holdings("alpha")
+    assert held.quantity == Decimal("0.3")  # not 0.1 + 0.3
+    assert held.avg_entry_price == Decimal("2600")
+    assert held.fees_paid == Decimal("0.3")
+    [trade] = s.ledger.trades("alpha")
+    assert trade.status == FillStatus.PARTIAL.value
+    assert s.ledger.unfinished_trades() == []
 
 
 def test_still_open_after_timeout_is_cancelled_and_final_fill_reported(

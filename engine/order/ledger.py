@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -92,6 +92,45 @@ def fees_in_quote(symbol: str, fees: dict[str, Decimal], price: Decimal) -> Deci
         else:
             log.warning("fee of %s %s on %s not counted in fees_paid", amount, coin, symbol)
     return total
+
+
+def _already_applied(
+    fill: FillConfirmation,
+    qty: str | None,
+    price: str | None,
+    fees: str | None,
+) -> tuple[Decimal, Decimal, dict[str, Decimal]] | None:
+    """What an ``unknown`` trade row already put into the holdings (signed
+    quantity, its average price, its fees) — ``None`` if nothing."""
+    if qty is None or Decimal(qty) == 0:
+        return None
+    return (
+        Decimal(qty),
+        Decimal(price or 0),
+        {coin: Decimal(a) for coin, a in json.loads(fees or "{}").items()},
+    )
+
+
+def _rest_of(
+    fill: FillConfirmation, applied: tuple[Decimal, Decimal, dict[str, Decimal]]
+) -> FillConfirmation | None:
+    """The part of *fill* not yet in the holdings: the extra quantity at the
+    average price it implies, and the extra fees.  ``None`` if nothing new."""
+    qty, price, fees = applied
+    extra_qty = fill.quantity - qty
+    extra_fees = {
+        coin: amount - fees.get(coin, Decimal(0))
+        for coin, amount in fill.fees.items()
+        if amount != fees.get(coin, Decimal(0))
+    }
+    if extra_qty == 0 and not extra_fees:
+        return None
+    extra_price = (
+        (fill.quantity * fill.fill_price - qty * price) / extra_qty
+        if extra_qty != 0
+        else fill.fill_price
+    )
+    return replace(fill, quantity=extra_qty, fill_price=extra_price, fees=extra_fees)
 
 
 def apply_fill(
@@ -324,7 +363,9 @@ class LedgerDB:
                 ON trades(status);
 
             -- Guard trips (engine/order/guard_registry.py): a trip stays
-            -- until reset; a reset re-arms the guard from reset_pnl.
+            -- until reset; a reset re-arms the guard from reset_pnl
+            -- (realized + funding - fees) and, when the guard also counts
+            -- unrealized, reset_pnl_net (the same plus unrealized).
             CREATE TABLE IF NOT EXISTS guard_trips (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 strategy_id         INTEGER NOT NULL REFERENCES strategies(id),
@@ -333,7 +374,8 @@ class LedgerDB:
                 max_loss            TEXT NOT NULL,
                 include_unrealized  INTEGER NOT NULL,
                 reset_at            TEXT,
-                reset_pnl           TEXT
+                reset_pnl           TEXT,
+                reset_pnl_net       TEXT
             );
 
             CREATE TABLE IF NOT EXISTS holdings (
@@ -348,6 +390,11 @@ class LedgerDB:
                 PRIMARY KEY (strategy_id, exchange, symbol)
             );
         """)
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(guard_trips)")
+        }
+        if "reset_pnl_net" not in columns:  # ledgers from before the two baselines
+            self._conn.execute("ALTER TABLE guard_trips ADD COLUMN reset_pnl_net TEXT")
         self._conn.commit()
 
     # ------------------------------------------------------------------ registry
@@ -462,26 +509,31 @@ class LedgerDB:
         transaction.
 
         Only a ``pending`` or ``unknown`` trade can be updated, so the same
-        fill is never applied twice.  Returns whether it was recorded.
-        *at* overrides the update time (the recovery uses the exchange's).
+        fill is never applied twice.  An ``unknown`` trade may already hold
+        what had filled when it was given up on (still open after the
+        cancel); updating it applies only the rest.  Returns whether it was
+        recorded.  *at* overrides the update time (the recovery uses the
+        exchange's).
         """
         tag = fill.order_link_id
         if not tag:
             return False
         with self._conn:
             row = self._conn.execute(
-                "SELECT strategy_id, status FROM trades WHERE order_link_id = ?",
+                "SELECT strategy_id, status, filled_qty, avg_price, fees FROM trades"
+                " WHERE order_link_id = ?",
                 (tag,),
             ).fetchone()
             if row is None:
                 log.error("no trade row for %s — fill not recorded: %s", tag, fill)
                 return False
-            sid, status = row
+            sid, status, before_qty, before_price, before_fees = row
             if status not in _UNFINISHED:
                 log.warning(
                     "trade %s is already %s — ignoring %s", tag, status, fill.status
                 )
                 return False
+            applied = _already_applied(fill, before_qty, before_price, before_fees)
 
             executed = fill.quantity != 0
             self._conn.execute(
@@ -499,8 +551,11 @@ class LedgerDB:
                     tag,
                 ),
             )
-            if executed:
-                self._apply_to_holding(sid, fill)
+            if applied is None:
+                if executed:
+                    self._apply_to_holding(sid, fill)
+            elif (rest := _rest_of(fill, applied)) is not None:
+                self._apply_to_holding(sid, rest)
         return True
 
     def _apply_to_holding(self, sid: int, fill: FillConfirmation) -> None:
@@ -703,17 +758,21 @@ class LedgerDB:
             for name, at, pnl, limit, unrealized in rows
         }
 
-    def reset_trip(self, strategy: str, pnl: Decimal) -> bool:
+    def reset_trip(
+        self, strategy: str, pnl: Decimal, pnl_net: Decimal | None = None
+    ) -> bool:
         """Reset *strategy*'s trip; its guard re-arms from *pnl* (the loss
-        limit counts from here).  Returns ``False`` if it wasn't tripped."""
+        limit counts from here) — and from *pnl_net* for the checks that
+        count unrealized PnL.  Returns ``False`` if it wasn't tripped."""
         entry = self._strategies.get(strategy)
         if entry is None:
             return False
         with self._conn:
             cur = self._conn.execute(
-                "UPDATE guard_trips SET reset_at = ?, reset_pnl = ?"
+                "UPDATE guard_trips SET reset_at = ?, reset_pnl = ?, reset_pnl_net = ?"
                 " WHERE strategy_id = ? AND reset_at IS NULL",
-                (self._clock_now().isoformat(), str(pnl), entry[0]),
+                (self._clock_now().isoformat(), str(pnl),
+                 None if pnl_net is None else str(pnl_net), entry[0]),
             )
         return cur.rowcount > 0
 
@@ -726,6 +785,21 @@ class LedgerDB:
             " WHERE g.reset_at IS NOT NULL ORDER BY g.id"
         )
         return {name: Decimal(pnl) for name, pnl in rows}  # latest reset wins
+
+    def guard_baselines_net(self) -> dict[str, Decimal]:
+        """Like :meth:`guard_baselines`, for the checks that count unrealized
+        PnL — only strategies whose latest reset recorded one."""
+        out: dict[str, Decimal] = {}
+        for name, net in self._conn.execute(
+            "SELECT s.name, g.reset_pnl_net FROM guard_trips g"
+            " JOIN strategies s ON s.id = g.strategy_id"
+            " WHERE g.reset_at IS NOT NULL ORDER BY g.id"
+        ):
+            if net is None:
+                out.pop(name, None)  # the latest reset didn't count unrealized
+            else:
+                out[name] = Decimal(net)
+        return out
 
     # ----------------------------------------------------------- recovery only
     #
@@ -748,6 +822,30 @@ class LedgerDB:
                 "UPDATE strategies SET counter = ? WHERE id = ?", (counter, entry[0])
             )
         entry[1] = counter
+
+    def copy_guard_trips(self, source: LedgerDB) -> int:
+        """Copy every guard trip and reset of *source* (trips still latched,
+        reset baselines) for the strategies restored here; returns how many."""
+        rows = source._conn.execute(
+            "SELECT s.name, g.tripped_at, g.pnl, g.max_loss, g.include_unrealized,"
+            " g.reset_at, g.reset_pnl, g.reset_pnl_net"
+            " FROM guard_trips g JOIN strategies s ON s.id = g.strategy_id"
+            " ORDER BY g.id"
+        ).fetchall()
+        copied = 0
+        with self._conn:
+            for name, *rest in rows:
+                entry = self._strategies.get(name)
+                if entry is None:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO guard_trips (strategy_id, tripped_at, pnl, max_loss,"
+                    " include_unrealized, reset_at, reset_pnl, reset_pnl_net)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (entry[0], *rest),
+                )
+                copied += 1
+        return copied
 
     def restore_holding(self, strategy: str, holding: Holding) -> None:
         with self._conn:

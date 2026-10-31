@@ -64,6 +64,8 @@ class StrategyRunner:
         # (symbol, bar type, interval) → open time of the newest start-up
         # history bar: live bars up to it were already seen as history.
         self._history_until: dict[tuple[str, str, int | None], datetime] = {}
+        # Live events, once subscribed (subscribe / run).
+        self._queue: asyncio.Queue[BusEvent] | None = None
 
     @property
     def pnl_calc(self) -> PnLCalc:
@@ -77,9 +79,11 @@ class StrategyRunner:
         ``on_history_bar`` — after ``on_start``, before the first live
         event, and never to ``on_bar``, so nothing is traded on it.  Live
         bars arriving meanwhile wait in the queue; one that the history
-        already covered is skipped, so no bar is seen twice.
+        already covered is skipped, so no bar is seen twice.  Call
+        :meth:`subscribe` before fetching *history*, so no live bar falls
+        between the two.
         """
-        queue = self._bus.subscribe(*self._topics)
+        queue = self.subscribe()
         self.begin(history)
         try:
             while True:
@@ -87,6 +91,13 @@ class StrategyRunner:
         finally:
             self._strategy.on_stop()
             self._bus.unsubscribe(queue)
+
+    def subscribe(self) -> asyncio.Queue[BusEvent]:
+        """Start queueing live events for :meth:`run` (once; later calls
+        return the same queue)."""
+        if self._queue is None:
+            self._queue = self._bus.subscribe(*self._topics)
+        return self._queue
 
     def begin(self, history: Iterable[AnyBar] = ()) -> None:
         """``on_start``, then *history* to ``on_history_bar`` — the start of

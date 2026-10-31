@@ -95,6 +95,44 @@ def test_reset_rearms_incl_unrealized_when_checks_count_it(tmp_path: Path) -> No
     assert guard.check("alpha", unrealized=True) == Decimal("0")
 
 
+def test_reset_with_open_profit_doesnt_retrip_realized_checks(tmp_path: Path) -> None:
+    """Each check subtracts the baseline that matches what it counts: an
+    open profit at reset isn't a "loss" for the realized-only checks."""
+    ledger = LedgerDB(tmp_path / "ledger.db")
+    _fill(ledger, "10", "100")
+    _fill(ledger, "-10", "80")  # realized −200, fees 1
+    prices = _Prices("150")
+    guard = _guard(ledger, tmp_path, every=10, prices=prices)
+    guard.check("alpha")
+    assert not guard.is_active("alpha")
+    _fill(ledger, "10", "100")  # reopened by hand: +500 open at 150
+
+    asyncio.run(guard.refresh_prices(["alpha"]))
+    assert guard.reset("alpha") == Decimal("298.5")  # −201.5 realized, +500 open
+    assert guard.check("alpha") == Decimal("0")  # per-fill check: realized only
+    assert guard.check("alpha", unrealized=True) == Decimal("0")
+    assert guard.is_active("alpha")
+
+    again = _guard(ledger, tmp_path, every=10, prices=prices)  # after a restart
+    assert again.check("alpha") == Decimal("0")
+    asyncio.run(again.refresh_prices(["alpha"]))
+    assert again.check("alpha", unrealized=True) == Decimal("0")
+
+
+def test_reset_with_open_loss_gives_realized_checks_no_extra_room(
+    tmp_path: Path,
+) -> None:
+    ledger = LedgerDB(tmp_path / "ledger.db")
+    _fill(ledger, "10", "100")
+    guard = _guard(ledger, tmp_path, every=1, prices=_Prices("80"))
+    asyncio.run(guard.check_all())  # −200.5 incl. unrealized → tripped
+    guard.reset("alpha")
+
+    _fill(ledger, "-10", "80")  # the open loss is realized: −200 since the reset
+    guard.check("alpha")  # realized only, as after every fill
+    assert not guard.is_active("alpha")
+
+
 # ------------------------------------------------------------ close on trip
 
 
@@ -140,6 +178,24 @@ def test_trip_closes_only_the_tripped_strategys_positions(tmp_path: Path) -> Non
     assert close.client_order_id is not None
     assert close.client_order_id.startswith(f"{ledger.strategy_num('alpha')}_")
     assert len(ledger.trades("alpha")) == 3  # recorded as alpha's own order
+
+
+def test_close_above_the_largest_market_order_is_split(tmp_path: Path) -> None:
+    ledger = LedgerDB(tmp_path / "ledger.db")
+    _fill(ledger, "25", "100")
+    broker = _Broker()
+    consolidator = OrderConsolidator(
+        target_queue=asyncio.Queue(), brokers={"bybit_demo": broker},
+        default_exchange="bybit_demo", guard_registry=_guard(ledger, tmp_path),
+        ledger=ledger,
+        max_order_qty=lambda exchange, symbol: Decimal(10),
+    )
+
+    asyncio.run(consolidator._close_positions("alpha"))
+
+    assert [o.quantity for o in broker.placed] == [Decimal(10), Decimal(10), Decimal(5)]
+    assert {o.side for o in broker.placed} == {OrderSide.SELL}
+    assert _held(ledger, "alpha") == 0
 
 
 def test_no_close_when_switched_off_for_that_strategy(tmp_path: Path) -> None:

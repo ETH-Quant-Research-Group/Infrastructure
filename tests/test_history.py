@@ -154,6 +154,38 @@ def test_history_goes_to_on_history_bar_after_on_start_then_live_to_on_bar() -> 
     ]
 
 
+def test_live_bars_queued_while_the_history_is_fetched_are_not_lost() -> None:
+    """Like the NATS bus: a queue only gets events published after its
+    subscribe — so the worker subscribes before fetching the history."""
+
+    class _FreshQueueBus(_Bus):
+        def __init__(self) -> None:
+            self.queues: list[asyncio.Queue[Any]] = []
+
+        def subscribe(self, *topics: str) -> asyncio.Queue[Any]:
+            self.queues.append(asyncio.Queue())
+            return self.queues[-1]
+
+    strategy, bus = _Recorder(), _FreshQueueBus()
+    runner = StrategyRunner(
+        strategy_id="alpha", strategy=strategy, bus=bus, topics=strategy.topics,
+        target_queue=asyncio.Queue(), guard=StrategyGuard(max_loss=Decimal(1000)),
+        pnlcalc=PnLCalc(),
+    )
+
+    async def go() -> None:
+        runner.subscribe()
+        bus.queues[0].put_nowait(_bar(2))  # closed while the history was being fetched
+        task = asyncio.create_task(runner.run([_bar(0), _bar(1)]))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        task.cancel()
+
+    asyncio.run(go())
+    assert len(bus.queues) == 1  # run() kept the early subscription
+    assert [c for c in strategy.calls if c[0] == "live"] == [("live", _T0 + 2 * _8H)]
+
+
 def test_a_live_bar_the_history_already_covered_is_skipped() -> None:
     strategy, _ = _run([_bar(0), _bar(1)], [_bar(1), _bar(2)])
 

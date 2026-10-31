@@ -228,6 +228,7 @@ async def run_backtest(
         target_queue=targets, brokers=brokers, default_exchange=PERP_EXCHANGE,
         fills_queue=fills, order_factory=order_factory, guard_registry=guard,
         ledger=ledger, order_check=instruments.check,
+        max_order_qty=instruments.max_market_qty,
     )
     runner = StrategyRunner(
         strategy_id=name, strategy=strategy, bus=_NoBus(), topics=list(strategy.topics),

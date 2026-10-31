@@ -211,6 +211,16 @@ def rebuild(
                 target, current, num, name, snaps.get(name), by_num.get(num, {}), margin
             )
         )
+    # The guard's state isn't on the exchange: latched trips and reset
+    # baselines come over from the current ledger, or are lost with it.
+    if current is not None:
+        target.copy_guard_trips(current)
+    else:
+        for s in report.strategies:
+            s.notes.append(
+                "guard trips and resets are lost with the ledger - check"
+                " `guard_control status` and stop / reset by hand"
+            )
     return report
 
 

@@ -101,10 +101,15 @@ class StrategyGuardRegistry:
         self._include_unrealized = include_unrealized
         self._price_cache: dict[tuple[str, str], Decimal | None] = {}
         self._tripped: dict[str, GuardTrip] = {}
+        # PnL at the last reset: realized + funding - fees, and (when any
+        # check counts it) the same plus unrealized.  Each check subtracts
+        # the one that matches what it counts.
         self._baselines: dict[str, Decimal] = {}
+        self._baselines_net: dict[str, Decimal] = {}
         if ledger is not None:
             self._tripped = ledger.active_trips()
             self._baselines = ledger.guard_baselines()
+            self._baselines_net = ledger.guard_baselines_net()
             # Already handled before the restart: don't stop containers again.
             self._notified = set(self._tripped)
             if self._tripped:
@@ -215,9 +220,22 @@ class StrategyGuardRegistry:
         reset; ``None`` if a needed price is missing.  *unrealized* says
         whether to count unrealized PnL (at the last fetched prices);
         default: only if ``include_unrealized``."""
-        assert self._ledger is not None
         if unrealized is None:
             unrealized = self._include_unrealized
+        raw = self._raw_pnl(strategy_id, unrealized=unrealized)
+        if raw is None:
+            return None
+        return raw - self._baseline(strategy_id, unrealized=unrealized)
+
+    def _baseline(self, strategy_id: str, *, unrealized: bool) -> Decimal:
+        realized = self._baselines.get(strategy_id, Decimal(0))
+        if not unrealized:
+            return realized
+        return self._baselines_net.get(strategy_id, realized)
+
+    def _raw_pnl(self, strategy_id: str, *, unrealized: bool) -> Decimal | None:
+        """*strategy_id*'s PnL since its first order (no reset baseline)."""
+        assert self._ledger is not None
         if strategy_id not in self._ledger.strategy_ids():
             return Decimal(0)  # no orders yet
         snap = self._ledger.snapshot(strategy_id)
@@ -232,7 +250,7 @@ class StrategyGuardRegistry:
             if open_pnl is None:
                 return None
             pnl += open_pnl
-        return pnl - self._baselines.get(strategy_id, Decimal(0))
+        return pnl
 
     def check(self, strategy_id: str, *, unrealized: bool | None = None) -> Decimal | None:
         """Check one strategy's guard now; returns the PnL it checked.
@@ -302,20 +320,31 @@ class StrategyGuardRegistry:
     def reset(self, strategy_id: str) -> Decimal:
         """Lift *strategy_id*'s trip; its guard re-arms from its current PnL.
 
-        Returns the new baseline.  Raises ``ValueError`` if it isn't tripped
-        or its PnL can't be priced right now.  When any check counts
-        unrealized PnL, the current PnL includes it (call
+        Returns the new baseline (incl. unrealized when any check counts
+        it).  Raises ``ValueError`` if it isn't tripped or its PnL can't be
+        priced right now.  When any check counts unrealized PnL, a second
+        baseline incl. unrealized is kept for those checks, so realized-only
+        checks never compare against an open position's value (call
         :meth:`refresh_prices` first for fresh prices).
         """
         assert self._ledger is not None
         if strategy_id not in self._tripped:
             raise ValueError(f"guard for {strategy_id!r} is not tripped")
-        current = self.pnl(strategy_id, unrealized=self.counts_unrealized)
-        if current is None:
+        baseline = self._raw_pnl(strategy_id, unrealized=False)
+        baseline_net = (
+            self._raw_pnl(strategy_id, unrealized=True)
+            if self.counts_unrealized
+            else None
+        )
+        if baseline is None or (self.counts_unrealized and baseline_net is None):
             raise ValueError(f"can't price {strategy_id!r} right now - try again")
-        baseline = self._baselines.get(strategy_id, Decimal(0)) + current
-        self._ledger.reset_trip(strategy_id, baseline)
+        self._ledger.reset_trip(strategy_id, baseline, baseline_net)
         self._baselines[strategy_id] = baseline
+        if baseline_net is None:
+            self._baselines_net.pop(strategy_id, None)
+        else:
+            self._baselines_net[strategy_id] = baseline_net
+        baseline = baseline if baseline_net is None else baseline_net
         del self._tripped[strategy_id]
         self._notified.discard(strategy_id)
         log.warning("guard RESET for strategy_id=%r, re-armed from PnL %s", strategy_id, baseline)
@@ -345,7 +374,9 @@ class StrategyGuardRegistry:
                 "strategy": name,
                 "pnl": None if pnl is None else str(pnl),
                 "max_loss": str(self._entry(name).guard.max_loss),
-                "baseline": str(self._baselines.get(name, Decimal(0))),
+                "baseline": str(
+                    self._baseline(name, unrealized=self._include_unrealized)
+                ),
                 "include_unrealized": self._include_unrealized,
                 "unrealized_every": self._unrealized_every,
                 "close_on_trip": self.closes_on_trip(name),

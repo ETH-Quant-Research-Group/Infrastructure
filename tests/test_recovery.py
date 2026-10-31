@@ -120,6 +120,35 @@ def test_check_finds_nothing_wrong_with_an_intact_ledger(tmp_path: Path) -> None
     assert target.counter("alpha") == 104
 
 
+def test_guard_trips_and_resets_survive_a_rebuild(tmp_path: Path) -> None:
+    live = _Live(tmp_path)
+    live.order("1", "100")
+    live.order("1", "100", strategy="beta")
+    live.snapshot()
+    live.snapshot("beta")
+    # alpha's trip is still latched; beta's was reset
+    live.ledger.record_trip("alpha", Decimal(-150), Decimal(100), False)
+    live.ledger.record_trip("beta", Decimal(-120), Decimal(100), True)
+    live.ledger.reset_trip("beta", Decimal(-120), Decimal(-130))
+
+    target, _ = _rebuild(tmp_path, live, live.ledger)
+
+    assert list(target.active_trips()) == ["alpha"]
+    assert target.guard_baselines() == {"beta": Decimal(-120)}
+    assert target.guard_baselines_net() == {"beta": Decimal(-130)}
+
+
+def test_guard_trips_lost_with_the_ledger_are_reported(tmp_path: Path) -> None:
+    live = _Live(tmp_path)
+    live.order("1", "100")
+    live.snapshot()
+
+    _, report = _rebuild(tmp_path, live, current=None)
+
+    (s,) = report.strategies
+    assert any("guard trips and resets are lost" in n for n in s.notes)
+
+
 def test_rebuilds_a_lost_ledger_from_snapshot_and_exchange(tmp_path: Path) -> None:
     live = _Live(tmp_path)
     live.order("2", "100")

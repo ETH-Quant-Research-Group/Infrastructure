@@ -488,10 +488,14 @@ async def main() -> None:
         order_sizing = OrderSizing()
         await _fetch_order_sizing(nc, sizing_symbols, order_sizing)
         strategy_instance.order_sizing = order_sizing
+        # Live bars are queued from here on, so none falls between the
+        # history snapshot and the first live one (the runner skips the
+        # ones the history already has).
+        runner.subscribe()
+        await bus.start(nc)
         # Past bars for on_history_bar (warm-up), fed by the runner after
         # on_start and before any live bar — never to on_bar (B12).
         history = await _fetch_history(nc, list(strategy_cls.topics))
-        await bus.start(nc)
 
         await nc.publish(
             f"strategy.register.{strategy_cls.__name__}",

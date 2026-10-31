@@ -884,6 +884,7 @@ async def main() -> None:
         ledger=ledger,
         snapshots=snapshots,
         order_check=INSTRUMENTS.check,
+        max_order_qty=INSTRUMENTS.max_market_qty,
     )
 
     # Real order-size rules for every symbol, loaded once and kept in memory.

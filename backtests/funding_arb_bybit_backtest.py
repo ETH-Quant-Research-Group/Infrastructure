@@ -602,7 +602,8 @@ async def run_backtest(md: MarketData, params: dict, cfg: Config, quiet: bool = 
     cons = OrderConsolidator(target_queue=target_q, brokers=brokers,
                              default_exchange=PERP_EX, min_order_size=cfg.min_order_size,
                              fills_queue=fills_q, order_factory=cw._order_factory,
-                             guard_registry=registry, order_check=cw.INSTRUMENTS.check)
+                             guard_registry=registry, order_check=cw.INSTRUMENTS.check,
+                             max_order_qty=cw.INSTRUMENTS.max_market_qty)
 
     warn = _CountingHandler()
     slog = logging.getLogger(strat_mod.__name__)

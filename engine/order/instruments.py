@@ -139,6 +139,12 @@ class InstrumentCache:
         rules = self.rules(exchange, symbol)
         return qty if rules is None else round_down(qty, rules.qty_step)
 
+    def max_market_qty(self, exchange: str, symbol: str) -> Decimal | None:
+        """The largest market order for *symbol*, if known — the
+        consolidator's ``max_order_qty`` hook (guard closes are split)."""
+        rules = self.rules(exchange, symbol)
+        return None if rules is None else rules.max_market_qty
+
     def check(self, exchange: str, order: Order, price: Decimal | None) -> str | None:
         """Why *order* can't be sent on *exchange*, or ``None`` — the
         consolidator's ``order_check`` hook."""

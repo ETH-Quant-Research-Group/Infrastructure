@@ -33,6 +33,8 @@ OrderFactory = Callable[[str, OrderSide, Decimal, Decimal, str], Order]
 # E.g. InstrumentCache.check (engine/order/instruments.py): Bybit's lot size,
 # minimum / maximum quantity and minimum order value.
 OrderCheck = Callable[[str, Order, Decimal], "str | None"]
+#: (exchange, symbol) → the largest market order allowed, or None if unknown.
+MaxOrderQty = Callable[[str, str], "Decimal | None"]
 
 
 class _ClosePositions:
@@ -109,6 +111,7 @@ class OrderConsolidator:
         ledger: LedgerDB | None = None,
         snapshots: SnapshotDB | None = None,
         order_check: OrderCheck | None = None,
+        max_order_qty: MaxOrderQty | None = None,
         fill_timeout: float = 30.0,
         poll_interval: float = 0.2,
         max_poll_interval: float = 1.0,
@@ -130,6 +133,7 @@ class OrderConsolidator:
         self._ledger = ledger
         self._snapshots = snapshots
         self._order_check = order_check
+        self._max_order_qty = max_order_qty
         self._fill_timeout = fill_timeout
         self._poll_interval = poll_interval
         self._max_poll_interval = max_poll_interval
@@ -320,6 +324,16 @@ class OrderConsolidator:
         for strategy_id in self._guard_registry.pop_to_close():
             self.request_close(strategy_id)
 
+    def _close_chunks(self, exchange: str, symbol: str, qty: Decimal) -> list[Decimal]:
+        """*qty* split into orders no bigger than the exchange's largest
+        market order (one order if that's unknown)."""
+        largest = self._max_order_qty(exchange, symbol) if self._max_order_qty else None
+        if largest is None or largest <= 0 or abs(qty) <= largest:
+            return [qty]
+        sign = Decimal(1) if qty > 0 else Decimal(-1)
+        full, rest = divmod(abs(qty), largest)
+        return [sign * largest] * int(full) + ([sign * rest] if rest else [])
+
     async def _close_positions(self, strategy_id: str) -> None:
         """Send one order per open holding of *strategy_id* that brings it to
         0 — tagged as its orders, recorded in its ledger, let through its
@@ -340,16 +354,17 @@ class OrderConsolidator:
             ", ".join(f"{h.exchange}:{h.symbol} {h.quantity}" for h in open_),
         )
         for h in open_:
-            await self._reconcile(
-                TargetPosition(
-                    symbol=h.symbol,
-                    quantity=-h.quantity,
-                    price=h.avg_entry_price,  # only for the min-value check
-                    strategy_id=strategy_id,
-                    exchange=h.exchange,
-                ),
-                guard_close=True,
-            )
+            for qty in self._close_chunks(h.exchange, h.symbol, -h.quantity):
+                await self._reconcile(
+                    TargetPosition(
+                        symbol=h.symbol,
+                        quantity=qty,
+                        price=h.avg_entry_price,  # only for the min-value check
+                        strategy_id=strategy_id,
+                        exchange=h.exchange,
+                    ),
+                    guard_close=True,
+                )
         left = [h for h in self._ledger.snapshot(strategy_id).holdings if h.quantity != 0]
         if left:
             # Spot sells leave dust below the minimum order size; anything
@@ -722,14 +737,18 @@ class OrderConsolidator:
             else:
                 fill_status = FillStatus.UNKNOWN
                 reason = f"order still {status.raw_status} after timeout"
-        elif filled < order.quantity:
-            fill_status = FillStatus.PARTIAL
+        elif not status.state.is_final:
+            # Still open after the cancel: more may fill.  UNKNOWN keeps the
+            # trade unfinished, so the recovery records the rest later (the
+            # ledger applies only what's new); PARTIAL would be final.
+            fill_status = FillStatus.UNKNOWN
             reason = (
-                f"order {status.raw_status}, {filled} of {order.quantity} filled"
-                if status.state.is_final
-                else f"order still {status.raw_status} after timeout, "
+                f"order still {status.raw_status} after timeout, "
                 f"{filled} of {order.quantity} filled so far"
             )
+        elif filled < order.quantity:
+            fill_status = FillStatus.PARTIAL
+            reason = f"order {status.raw_status}, {filled} of {order.quantity} filled"
         else:
             fill_status = FillStatus.FILLED
 
