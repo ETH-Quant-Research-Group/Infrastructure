@@ -14,6 +14,7 @@ from execution.types import (
     FillConfirmation,
     FillStatus,
     Order,
+    OrderResult,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -116,6 +117,7 @@ class OrderConsolidator:
         poll_interval: float = 0.2,
         max_poll_interval: float = 1.0,
         cancel_timeout: float = 5.0,
+        history_grace: float = 30.0,
     ) -> None:
         if default_exchange not in brokers:
             raise ValueError(
@@ -138,6 +140,7 @@ class OrderConsolidator:
         self._poll_interval = poll_interval
         self._max_poll_interval = max_poll_interval
         self._cancel_timeout = cancel_timeout
+        self._history_grace = history_grace
         # strategy_id → {(exchange, symbol) → cumulative filled qty}, from real
         # fills only.  Bookkeeping for tracked_symbols; never used for sizing.
         self._positions: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(dict)
@@ -507,9 +510,28 @@ class OrderConsolidator:
             )
         tag = order.client_order_id
 
-        result = await broker.place_order(order)
+        try:
+            result = await broker.place_order(order)
+        except Exception as exc:
+            # The broker should return an OrderResult, but if it raises we
+            # can't tell whether the order reached the exchange: look it up
+            # by its tag, like a request lost in transit.
+            log.exception(
+                "place_order raised [%s] %s %s qty=%s link=%s",
+                exchange, symbol, side, order.quantity, tag,
+            )
+            result = OrderResult(
+                order_id=None,
+                order=order,
+                error=f"{type(exc).__name__}: {exc}",
+                maybe_placed=True,
+            )
         if self._ledger is not None and tag and result.error is None and result.order_id:
-            self._ledger.record_accepted(tag, result.order_id)
+            try:
+                self._ledger.record_accepted(tag, result.order_id)
+            except Exception:
+                # Only the exchange id is lost; the row is still found by tag.
+                log.exception("ledger: could not record accepted order link=%s", tag)
 
         if result.error and not result.maybe_placed:
             log.error(
@@ -567,12 +589,12 @@ class OrderConsolidator:
                     "order ACCEPTED but NOT FOUND [%s] %s %s qty=%s link=%s id=%s"
                     " after %.0fs — check the order on Bybit by hand",
                     exchange, symbol, side, order.quantity, tag, result.order_id,
-                    self._fill_timeout,
+                    self._fill_timeout + self._history_grace,
                 )
                 report(
                     FillStatus.UNKNOWN,
                     f"order accepted but not found on the exchange after "
-                    f"{self._fill_timeout:.0f}s",
+                    f"{self._fill_timeout + self._history_grace:.0f}s",
                     result.order_id,
                 )
             elif answered:
@@ -585,7 +607,8 @@ class OrderConsolidator:
                 report(
                     FillStatus.REJECTED,
                     f"request lost in transit ({result.error}), order not found "
-                    f"on the exchange after {self._fill_timeout:.0f}s",
+                    f"on the exchange after "
+                    f"{self._fill_timeout + self._history_grace:.0f}s",
                 )
             else:
                 log.error(
@@ -687,27 +710,46 @@ class OrderConsolidator:
         ``max_poll_interval``.
 
         Lookup errors are retried — "couldn't ask" is never treated as
-        "doesn't exist".
+        "doesn't exist".  A "not found" never replaces a status already
+        seen: a finished order leaves Bybit's realtime list before it shows
+        up in its (lagging) history, so for a moment it is in neither.  If
+        the last lookup said "not found" when *timeout* passes, polling goes
+        on for ``history_grace`` more seconds to give the history time to
+        catch up.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         interval = self._poll_interval
         status: OrderStatus | None = None
         answered = False
+        not_found = False
+        grace_used = False
         while True:
             try:
-                status = await broker.order_status(
+                reply = await broker.order_status(
                     order_id=order_id, client_order_id=tag, symbol=symbol
                 )
                 answered = True
+                not_found = reply is None
+                if reply is not None:
+                    status = reply
             except Exception as exc:
+                not_found = False
                 log.warning(
                     "order_status lookup failed link=%s id=%s: %s", tag, order_id, exc
                 )
             if status is not None and status.state.is_final:
                 return status, answered
             if loop.time() >= deadline:
-                return status, answered
+                if not (not_found and not grace_used and self._history_grace > 0):
+                    return status, answered
+                grace_used = True
+                deadline = loop.time() + self._history_grace
+                log.warning(
+                    "order not found link=%s id=%s after %.0fs — waiting up to"
+                    " %.0fs more for Bybit's order history to catch up",
+                    tag, order_id, timeout, self._history_grace,
+                )
             await asyncio.sleep(interval)
             interval = min(interval * 1.5, self._max_poll_interval)
 

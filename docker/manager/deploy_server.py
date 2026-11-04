@@ -37,6 +37,7 @@ import json
 import os
 import re
 import subprocess  # nosec B404 - this whole file exists to run docker commands
+import uuid
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -99,11 +100,15 @@ def _known_services() -> set[str]:
     return {s.strip() for s in result.stdout.splitlines() if s.strip()}
 
 
-def _backtest_cmd(image: str, env: dict, args: list[str]) -> list[str]:
+def _backtest_cmd(
+    image: str, env: dict, args: list[str], container: str
+) -> list[str]:
     """`docker run` for one backtest step inside *image*: no network, no
-    key, the history cache read-only, bounded CPU / memory, removed after."""
+    key, the history cache read-only, bounded CPU / memory, removed after.
+    Named *container* so it can be removed if the page goes away mid-run."""
     cmd = [
         "docker", "run", "--rm",
+        "--name", container,
         "--network", "none",
         "--cpus", os.environ.get("BACKTEST_CPUS", "2"),
         "--memory", os.environ.get("BACKTEST_MEMORY", "4g"),
@@ -562,7 +567,10 @@ class Handler(BaseHTTPRequestHandler):
                     "--start", run["start"], "--end", run["end"],
                     "--interval", run["interval"], "--dataset", run["dataset"],
                 ]
-                result, code = self._stream_backtest(_backtest_cmd(image, env, args))
+                container = f"backtest-{uuid.uuid4().hex[:12]}"
+                result, code = self._stream_backtest(
+                    _backtest_cmd(image, env, args, container), container
+                )
                 if result is None:
                     self._emit_event("run_failed", index=i, exit_code=code)
                     continue
@@ -585,22 +593,42 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._end_sse()
 
-    def _stream_backtest(self, cmd: list[str]) -> tuple[dict | None, int]:
-        """Like _stream_command, but the result line is kept, not relayed."""
+    def _stream_backtest(
+        self, cmd: list[str], container: str
+    ) -> tuple[dict | None, int]:
+        """Like _stream_command, but the result line is kept, not relayed.
+
+        If the page goes away mid-run (the write raises), the container is
+        removed: stopping the `docker run` client alone doesn't stop it."""
         self._write_sse_chunk(f"$ {' '.join(cmd)}")
         proc = subprocess.Popen(  # nosec B603 - shell=False, list args, see _run() above
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         result = None
-        for line in iter(proc.stdout.readline, ""):
-            if line.startswith(_RESULT_PREFIX):
+        finished = False
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                if line.startswith(_RESULT_PREFIX):
+                    try:
+                        result = json.loads(line[len(_RESULT_PREFIX):])
+                    except json.JSONDecodeError:
+                        self._write_sse_chunk("(unreadable result line)")
+                    continue
+                self._write_sse_chunk(line.rstrip("\n"))
+            finished = True
+        finally:
+            if finished:
+                proc.wait()
+            else:
+                # Left early (client gone): take the container down too.
+                _run(["docker", "rm", "-f", container])
+                proc.terminate()
                 try:
-                    result = json.loads(line[len(_RESULT_PREFIX):])
-                except json.JSONDecodeError:
-                    self._write_sse_chunk("(unreadable result line)")
-                continue
-            self._write_sse_chunk(line.rstrip("\n"))
-        proc.wait()
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            proc.stdout.close()
         return (result if proc.returncode == 0 else None), proc.returncode
 
     def _handle_backtest_result(self, backtest_id: str) -> None:
