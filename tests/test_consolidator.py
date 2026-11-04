@@ -202,6 +202,7 @@ class _Setup:
             poll_interval=0.005,
             max_poll_interval=0.01,
             cancel_timeout=0.02,
+            history_grace=0.05,
         )
 
     def signal(
@@ -398,6 +399,59 @@ def test_lookup_errors_are_retried(tmp_path: Path) -> None:
     s.signal("0.5")
 
     assert s.fill().status is FillStatus.FILLED
+
+
+def test_order_found_in_history_after_the_timeout_is_filled(tmp_path: Path) -> None:
+    # Not in the realtime list nor (yet) in the lagging history at the
+    # deadline: the grace period waits for the history to catch up.
+    broker = _Broker(lambda o: [None] * 6 + _filled(o))
+    s = _Setup(tmp_path, broker)
+    s.consolidator._fill_timeout = 0.01
+    s.consolidator._history_grace = 1.0  # not about the deadline: timers tick
+    s.signal("0.5")
+
+    fill = s.fill()
+    assert fill.status is FillStatus.FILLED
+    assert fill.quantity == Decimal("0.50")
+    assert broker.cancelled == []
+
+
+def test_order_seen_then_not_found_is_not_rejected(tmp_path: Path) -> None:
+    # Lost in transit, then seen open, then gone from the realtime list
+    # before the history has it: "not found" must not wipe out the order
+    # already seen, or a real fill would be recorded as a final REJECTED.
+    broker = _Broker(
+        lambda o: [_status(o, OrderState.PARTIALLY_FILLED, "0.2"), None],
+        place_error="ReadTimeout",
+        maybe_placed=True,
+    )
+    s = _Setup(tmp_path, broker)
+    s.signal("0.5")
+
+    fill = s.fill()
+    assert fill.status is FillStatus.UNKNOWN
+    assert fill.quantity == Decimal("0.2")
+    assert s.ledger.unfinished_trades()  # recovery finishes it at the next start
+
+
+def test_order_seen_then_found_in_history_is_filled(tmp_path: Path) -> None:
+    broker = _Broker(
+        lambda o: [
+            _status(o, OrderState.PARTIALLY_FILLED, "0.2"),
+            None, None, None, None, None, None,
+            *_filled(o),
+        ],
+        place_error="ReadTimeout",
+        maybe_placed=True,
+    )
+    s = _Setup(tmp_path, broker)
+    s.consolidator._fill_timeout = 0.01
+    s.consolidator._history_grace = 1.0
+    s.signal("0.5")
+
+    fill = s.fill()
+    assert fill.status is FillStatus.FILLED
+    assert fill.quantity == Decimal("0.5")
 
 
 def test_exchange_never_answers_is_unknown_not_rejected(tmp_path: Path) -> None:
@@ -631,15 +685,19 @@ def test_a_crashing_signal_does_not_kill_the_lane(tmp_path: Path) -> None:
 
     broker.place_order = flaky  # type: ignore[method-assign]
 
-    async def _run() -> FillConfirmation:
+    async def _run() -> list[FillConfirmation]:
         task = asyncio.create_task(s.consolidator.run())
         s.targets.put_nowait(s._target("0.5", "alpha"))
         s.targets.put_nowait(s._target("0.5", "alpha"))
-        fill = await asyncio.wait_for(s.fills.get(), 1)
+        fills = [await asyncio.wait_for(s.fills.get(), 1) for _ in range(2)]
         task.cancel()
-        return fill
+        return fills
 
-    assert asyncio.run(_run()).status is FillStatus.FILLED
+    crashed, second = asyncio.run(_run())
+    # The signal whose place_order raised is still answered (the order may
+    # have reached the exchange, so not REJECTED), and the lane goes on.
+    assert crashed.status is FillStatus.UNKNOWN
+    assert second.status is FillStatus.FILLED
 
 
 # ----------------------------------------------------------------- ledger
